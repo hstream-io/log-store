@@ -3,7 +3,18 @@
 # For more information, please see the documentation at:
 #   https://docs.haskellstack.org/en/stable/lock_files
 
-packages: []
+packages:
+- completed:
+    size: 15991
+    url: https://github.com/hstream-io/rocksdb-haskell/archive/57ded9b2ff368cb0292ef3e4e59b0bf899047b13.tar.gz
+    name: rocksdb-haskell
+    version: 0.1.0.0
+    sha256: 6393af4fca4c5981ca1d9a833c6ba02569e564681a255f3c21047d8274bb2447
+    pantry-tree:
+      size: 985
+      sha256: ee61db3d1e32017c8fa376b19896938317e2bd5a483374d1c5e2dc83193a4d5f
+  original:
+    url: https://github.com/hstream-io/rocksdb-haskell/archive/57ded9b2ff368cb0292ef3e4e59b0bf899047b13.tar.gz
 snapshots:
 - completed:
     size: 494635

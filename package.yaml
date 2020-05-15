@@ -21,9 +21,21 @@ description:         Please see the README on GitHub at <https://github.com/hstr
 
 dependencies:
 - base >= 4.7 && < 5
+- bytestring
+- conduit
+- data-default
+- binary
+- resourcet
+- filepath
+- directory
+- transformers
+- mtl
+- rocksdb-haskell
 
 library:
   source-dirs: src
+  exposed-modules:
+  - Log.Store.Base
 
 tests:
   log-store-test:
@@ -35,3 +47,8 @@ tests:
     - -with-rtsopts=-N
     dependencies:
     - log-store
+    - hspec
+    - hspec-expectations
+    - QuickCheck
+    - temporary-resourcet
+
