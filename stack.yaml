@@ -66,5 +66,5 @@ packages:
 # compiler-check: newer-minor
 
 extra-deps:
-- github: hstream-io/rocksdb-haskell
-  commit: 57ded9b2ff368cb0292ef3e4e59b0bf899047b13
+- github: daleiz/rocksdb-haskell
+  commit: 34cb367d4dae0de50e3aa959d2cce1f644554952
