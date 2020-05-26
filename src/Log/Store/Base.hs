@@ -118,6 +118,7 @@ initConfig (UserDefinedEnv config) = return config
 --
 -- | 1. init config
 -- | 2. create db path if necessary
+-- | 3. return db handles
 -- |
 initialize :: MonadIO m => Env -> m Context
 initialize env = liftIO $ do
@@ -158,9 +159,7 @@ generateLogId metaDb =
   do
     R.merge metaDb def maxLogIdKey (serialize (1 :: Word64))
     newId <- R.get metaDb def maxLogIdKey
-    case newId of
-      Nothing -> return Nothing
-      Just nid -> return $ Just $ deserialize nid
+    liftIM1 newId (return . Just . deserialize)
   where
     maxLogIdKey = "maxLogId"
 
@@ -242,9 +241,7 @@ generateEntryId metaDb logId =
   do
     R.merge metaDb def maxEntryIdKey (serialize (1 :: Word64))
     newId <- R.get metaDb def maxEntryIdKey
-    case newId of
-      Nothing -> return Nothing
-      Just id -> return $ Just $ deserialize id
+    liftIM1 newId (return . Just . deserialize)
   where
     maxEntryIdKey = serialize logId
 
@@ -279,7 +276,9 @@ shutDown = do
   R.close metaDbHandle
   R.close dataDbHandle
 
--- | autoRelease
+-- | function that wrap initialize and resource release. 
+-- | It is recommended to make open/append/read operations through this function.
+-- |
 withLogStore :: MonadUnliftIO m => Config -> ReaderT Context (ResourceT m) a -> m a
 withLogStore cfg r =  
   runResourceT
@@ -291,6 +290,8 @@ withLogStore cfg r =
         runReaderT r ctx
     )
 
+-- | helper functions to simplify code
+-- |
 liftIM1 :: MonadIO m => Maybe a -> (a -> m (Maybe b)) -> m (Maybe b)
 liftIM1 Nothing _ = return Nothing
 liftIM1 (Just a) f = f a
