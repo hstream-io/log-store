@@ -203,6 +203,17 @@ main = hspec $ do
                            Just ([Just "entry1", Just "entry2", Just "entry3"]),
                            Just ([Just "entry1", Just "entry2", Just "entry3"])
                          ]
+      it "put many entries to a log" $
+        ( exec
+            ( do
+                logHandle <-
+                  open
+                    "log"
+                    defaultOpenOptions {writeMode = True, createIfMissing = True}
+                liftIM1 logHandle (appendEntries 1100)
+            )
+        )
+          `shouldReturn` Just 1100
 
 -- | help run test case
 -- | wrap create temp directory
@@ -219,3 +230,17 @@ exec r =
             (runReaderT shutDown)
         runReaderT r ctx
     )
+
+-- | append n entries to a log
+appendEntries n lh = append' 1
+  where
+    append' x =
+      if (x == n)
+        then do
+          id <- appendEntry lh "entry"
+          -- liftIO $ print id
+          return id
+        else do
+          id <- appendEntry lh "entry"
+          -- liftIO $ print id
+          append' (x + 1)

@@ -21,8 +21,8 @@ module Log.Store.Base
     close,
     shutDown,
     withLogStore,
-    
-    -- * Options 
+
+    -- * Options
     defaultOpenOptions,
 
     -- * utils
@@ -30,7 +30,7 @@ module Log.Store.Base
     deserialize,
     liftIM1,
     liftIM2,
-    liftIM3
+    liftIM3,
   )
 where
 
@@ -39,7 +39,8 @@ import Control.Exception (bracket)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
-import Control.Monad.Trans.Resource (MonadResource, allocate, runResourceT, ResourceT, MonadUnliftIO)
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ResourceT, allocate, runResourceT)
 import Data.Binary (Binary)
 import qualified Data.Binary as Binary
 import Data.ByteString (ByteString, append)
@@ -48,7 +49,6 @@ import Data.Default (def)
 import Data.Word
 import qualified Database.RocksDB as R
 import System.FilePath.Posix ((</>))
-import Control.Monad.Trans (lift)
 
 -- | Log name
 type LogName = String
@@ -157,11 +157,21 @@ defaultConfig =
 generateLogId :: MonadIO m => R.DB -> m (Maybe LogID)
 generateLogId metaDb =
   do
-    R.merge metaDb def maxLogIdKey (serialize (1 :: Word64))
-    newId <- R.get metaDb def maxLogIdKey
-    liftIM1 newId (return . Just . deserialize)
+    oldId <- R.get metaDb def maxLogIdKey
+    case oldId of
+      Nothing -> do
+        R.put metaDb def maxLogIdKey (serialize (1 :: Word64))
+        return $ Just 1
+      Just oid -> updateLogId oid
   where
     maxLogIdKey = "maxLogId"
+    updateLogId oldId =
+      do
+        R.put metaDb def maxLogIdKey (serialize newLogId)
+        return $ Just $ newLogId
+      where
+        newLogId :: Word64
+        newLogId = (deserialize oldId) + 1
 
 -- | serialize logId/entryId
 serialize :: Binary b => b -> ByteString
@@ -192,6 +202,8 @@ open name op@OpenOptions {..} = do
             newId
             ( \id -> do
                 R.put mh def (serialize name) (serialize id)
+                -- init entryId to 0
+                R.put mh def (serialize id) (serialize (0 :: Word64))
                 return $
                   Just
                     LogHandle
@@ -219,8 +231,9 @@ appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m (Maybe Entry
 appendEntry lh@LogHandle {..} entry =
   liftIO $
     if writeMode openOptions
-      then do entryId <- generateEntryId metaDb logID
-              liftIM1 entryId saveEntry
+      then do
+        entryId <- generateEntryId metaDb logID
+        liftIM1 entryId saveEntry
       else return Nothing
   where
     saveEntry :: EntryID -> IO (Maybe EntryID)
@@ -232,18 +245,22 @@ appendEntry lh@LogHandle {..} entry =
 generateKey :: LogID -> EntryID -> ByteString
 generateKey logId entryId = append (serialize logId) (serialize entryId)
 
--- | generate entry Id when append success
+-- | generate entry Id
 -- |
--- | implement:
--- | like generateLogId
 generateEntryId :: MonadIO m => R.DB -> LogID -> m (Maybe EntryID)
 generateEntryId metaDb logId =
   do
-    R.merge metaDb def maxEntryIdKey (serialize (1 :: Word64))
-    newId <- R.get metaDb def maxEntryIdKey
-    liftIM1 newId (return . Just . deserialize)
+    oldId <- R.get metaDb def maxEntryIdKey
+    liftIM1 oldId updateEntryId
   where
     maxEntryIdKey = serialize logId
+    updateEntryId oldId =
+      do
+        R.put metaDb def maxEntryIdKey (serialize newEntryId)
+        return $ Just $ newEntryId
+      where
+        newEntryId :: Word64
+        newEntryId = (deserialize oldId) + 1
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
 readEntries ::
@@ -268,19 +285,19 @@ readEntries LogHandle {..} firstKey lastKey = liftIO $ do
 close :: MonadIO m => LogHandle -> ReaderT Context m ()
 close LogHandle {..} = return ()
 
--- | free init resource 
+-- | free init resource
 -- |
-shutDown :: MonadIO m => ReaderT Context m () 
-shutDown = do 
-  Context{..} <- ask
+shutDown :: MonadIO m => ReaderT Context m ()
+shutDown = do
+  Context {..} <- ask
   R.close metaDbHandle
   R.close dataDbHandle
 
--- | function that wrap initialize and resource release. 
+-- | function that wrap initialize and resource release.
 -- | It is recommended to make open/append/read operations through this function.
 -- |
 withLogStore :: MonadUnliftIO m => Config -> ReaderT Context (ResourceT m) a -> m a
-withLogStore cfg r =  
+withLogStore cfg r =
   runResourceT
     ( do
         (_, ctx) <-
