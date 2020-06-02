@@ -8,7 +8,9 @@ import Conduit ((.|), ConduitT, runConduit, sinkList)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, runReader, runReaderT)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, allocate, liftResourceT, runResourceT)
+import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
+import Control.Monad.Trans.Reader (mapReaderT)
+import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ResourceT, allocate, liftResourceT, runResourceT)
 import Data.Word (Word64)
 import Log.Store.Base
   ( Config (..),
@@ -24,9 +26,6 @@ import Log.Store.Base
     defaultOpenOptions,
     deserialize,
     initialize,
-    liftIM1,
-    liftIM2,
-    liftIM3,
     open,
     readEntries,
     readMode,
@@ -47,54 +46,54 @@ main = hspec $ do
   describe "Basic Functionality" $
     do
       it "put an entry to a log" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 logHandle <-
                   open
                     "log"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                liftIM1 logHandle (`appendEntry` "entry")
+                appendEntry logHandle "entry"
             )
         )
           `shouldReturn` Just 1
       it "put some entries to a log" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 logHandle <-
                   open
                     "log"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                entryId1 <- liftIM1 logHandle (`appendEntry` "entry1")
-                entryId2 <- liftIM1 logHandle (`appendEntry` "entry2")
-                entryId3 <- liftIM1 logHandle (`appendEntry` "entry3")
+                entryId1 <- appendEntry logHandle "entry1"
+                entryId2 <- appendEntry logHandle "entry2"
+                entryId3 <- appendEntry logHandle "entry3"
                 return [entryId1, entryId2, entryId3]
             )
         )
-          `shouldReturn` [Just 1, Just 2, Just 3]
+          `shouldReturn` Just [1, 2, 3]
       it "put some entries to multiple logs" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 lh1 <-
                   open
                     "log1"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                log1EntryId1 <- liftIM1 lh1 (`appendEntry` "entry1")
-                log1EntryId2 <- liftIM1 lh1 (`appendEntry` "entry2")
-                log1EntryId3 <- liftIM1 lh1 (`appendEntry` "entry3")
+                log1EntryId1 <- appendEntry lh1 "log1-entry1"
+                log1EntryId2 <- appendEntry lh1 "log1-entry2"
+                log1EntryId3 <- appendEntry lh1 "log1-entry3"
                 lh2 <-
                   open
                     "log2"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                log2EntryId1 <- liftIM1 lh2 (`appendEntry` "entry1")
-                log2EntryId2 <- liftIM1 lh2 (`appendEntry` "entry2")
-                log2EntryId3 <- liftIM1 lh2 (`appendEntry` "entry3")
+                log2EntryId1 <- appendEntry lh2 "log2-entry1"
+                log2EntryId2 <- appendEntry lh2 "log2-entry2"
+                log2EntryId3 <- appendEntry lh2 "log2-entry3"
                 lh3 <-
                   open
                     "log3"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                log3EntryId1 <- liftIM1 lh3 (`appendEntry` "entry1")
-                log3EntryId2 <- liftIM1 lh3 (`appendEntry` "entry2")
-                log3EntryId3 <- liftIM1 lh3 (`appendEntry` "entry3")
+                log3EntryId1 <- appendEntry lh3 "log3-entry1"
+                log3EntryId2 <- appendEntry lh3 "log3-entry2"
+                log3EntryId3 <- appendEntry lh3 "log3-entry3"
                 return
                   [ [log1EntryId1, log1EntryId2, log1EntryId3],
                     [log2EntryId1, log2EntryId2, log2EntryId3],
@@ -102,96 +101,69 @@ main = hspec $ do
                   ]
             )
         )
-          `shouldReturn` [ [Just 1, Just 2, Just 3],
-                           [Just 1, Just 2, Just 3],
-                           [Just 1, Just 2, Just 3]
-                         ]
+          `shouldReturn` Just
+            [ [1, 2, 3],
+              [1, 2, 3],
+              [1, 2, 3]
+            ]
       it "put an entry to a log and read it" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 logHandle <-
                   open
                     "log"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                entryId <- liftIM1 logHandle (`appendEntry` "entry")
-                source <- liftIM3 logHandle entryId entryId readEntries
-                liftIM1
-                  source
-                  ( \s -> liftIO $ do
-                      r <- runConduit $ s .| sinkList
-                      return $ Just r
-                  )
+                entryId <- appendEntry logHandle "entry"
+                source <- readEntries logHandle entryId entryId
+                liftIO $ runConduit $ source .| sinkList
             )
         )
           `shouldReturn` (Just ([Just "entry"]))
       it "put some entries to a log and read them" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 logHandle <-
                   open
                     "log"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                entryId1 <- liftIM1 logHandle (`appendEntry` "entry1")
-                entryId2 <- liftIM1 logHandle (`appendEntry` "entry2")
-                entryId3 <- liftIM1 logHandle (`appendEntry` "entry3")
-                source <- liftIM3 logHandle entryId1 entryId3 readEntries
-                liftIM1
-                  source
-                  ( \s -> liftIO $ do
-                      r <- runConduit $ s .| sinkList
-                      return $ Just r
-                  )
+                entryId1 <- appendEntry logHandle "entry1"
+                entryId2 <- appendEntry logHandle "entry2"
+                entryId3 <- appendEntry logHandle "entry3"
+                source <- readEntries logHandle entryId1 entryId3
+                liftIO $ runConduit $ source .| sinkList
             )
         )
-          `shouldReturn` (Just ([Just "entry1", Just "entry2", Just "entry3"]))
+          `shouldReturn` Just [Just "entry1", Just "entry2", Just "entry3"]
       it "put some entries to multiple logs and read them" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 lh1 <-
                   open
                     "log1"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                log1EntryId1 <- liftIM1 lh1 (`appendEntry` "entry1")
-                log1EntryId2 <- liftIM1 lh1 (`appendEntry` "entry2")
-                log1EntryId3 <- liftIM1 lh1 (`appendEntry` "entry3")
+                log1EntryId1 <- appendEntry lh1 "log1-entry1"
+                log1EntryId2 <- appendEntry lh1 "log1-entry2"
+                log1EntryId3 <- appendEntry lh1 "log1-entry3"
                 lh2 <-
                   open
                     "log2"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                log2EntryId1 <- liftIM1 lh2 (`appendEntry` "entry1")
-                log2EntryId2 <- liftIM1 lh2 (`appendEntry` "entry2")
-                log2EntryId3 <- liftIM1 lh2 (`appendEntry` "entry3")
+                log2EntryId1 <- appendEntry lh2 "log2-entry1"
+                log2EntryId2 <- appendEntry lh2 "log2-entry2"
+                log2EntryId3 <- appendEntry lh2 "log2-entry3"
                 lh3 <-
                   open
                     "log3"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                log3EntryId1 <- liftIM1 lh3 (`appendEntry` "entry1")
-                log3EntryId2 <- liftIM1 lh3 (`appendEntry` "entry2")
-                log3EntryId3 <- liftIM1 lh3 (`appendEntry` "entry3")
-                source1 <- liftIM3 lh1 log1EntryId1 log1EntryId3 readEntries
-                r1 <-
-                  liftIM1
-                    source1
-                    ( \s -> liftIO $ do
-                        r <- runConduit $ s .| sinkList
-                        return $ Just r
-                    )
-                source2 <- liftIM3 lh2 log2EntryId1 log2EntryId3 readEntries
-                r2 <-
-                  liftIM1
-                    source2
-                    ( \s -> liftIO $ do
-                        r <- runConduit $ s .| sinkList
-                        return $ Just r
-                    )
-                source3 <- liftIM3 lh3 log3EntryId1 log3EntryId3 readEntries
-                r3 <-
-                  liftIM1
-                    source3
-                    ( \s -> liftIO $ do
-                        r <- runConduit $ s .| sinkList
-                        return $ Just r
-                    )
+                log3EntryId1 <- appendEntry lh3 "log3-entry1"
+                log3EntryId2 <- appendEntry lh3 "log3-entry2"
+                log3EntryId3 <- appendEntry lh3 "log3-entry3"
+                source1 <- readEntries lh1 log1EntryId1 log1EntryId3
+                r1 <- liftIO $ runConduit $ source1 .| sinkList
+                source2 <- readEntries lh2 log2EntryId1 log2EntryId3
+                r2 <- liftIO $ runConduit $ source2 .| sinkList
+                source3 <- readEntries lh3 log3EntryId1 log3EntryId3
+                r3 <- liftIO $ runConduit $ source3 .| sinkList
                 return
                   [ r1,
                     r2,
@@ -199,36 +171,36 @@ main = hspec $ do
                   ]
             )
         )
-          `shouldReturn` [ Just ([Just "entry1", Just "entry2", Just "entry3"]),
-                           Just ([Just "entry1", Just "entry2", Just "entry3"]),
-                           Just ([Just "entry1", Just "entry2", Just "entry3"])
-                         ]
+          `shouldReturn` Just
+            [ [Just "log1-entry1", Just "log1-entry2", Just "log1-entry3"],
+              [Just "log2-entry1", Just "log2-entry2", Just "log2-entry3"],
+              [Just "log3-entry1", Just "log3-entry2", Just "log3-entry3"]
+            ]
       it "put many entries to a log" $
-        ( exec
+        ( withLogStoreTest
             ( do
                 logHandle <-
                   open
                     "log"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
-                liftIM1 logHandle (appendEntries 1100)
+                appendEntries 1100 logHandle
             )
         )
           `shouldReturn` Just 1100
 
 -- | help run test case
 -- | wrap create temp directory
-exec r =
+withLogStoreTest :: MonadUnliftIO m => ReaderT Context (MaybeT m) a -> m (Maybe a)
+withLogStoreTest r =
   runResourceT
     ( do
         (_, path) <-
-          createTempDirectory
-            Nothing
-            $ "log-store-test"
+          createTempDirectory Nothing "log-store-test"
         (_, ctx) <-
           allocate
             (initialize $ UserDefinedEnv Config {rootDbPath = path})
             (runReaderT shutDown)
-        runReaderT r ctx
+        runReaderT (mapReaderT (lift . runMaybeT) r) ctx
     )
 
 -- | append n entries to a log

@@ -28,18 +28,17 @@ module Log.Store.Base
     -- * utils
     serialize,
     deserialize,
-    liftIM1,
-    liftIM2,
-    liftIM3,
   )
 where
 
 import Conduit ((.|), Conduit, ConduitT, mapC)
 import Control.Exception (bracket)
-import Control.Monad (when)
+import Control.Monad (mzero, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Maybe (MaybeT (..))
+import Control.Monad.Trans.Reader (mapReaderT)
 import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ResourceT, allocate, runResourceT)
 import Data.Binary (Binary)
 import qualified Data.Binary as Binary
@@ -154,21 +153,21 @@ defaultConfig =
 -- |
 -- | todo:
 -- | exception need to consider
-generateLogId :: MonadIO m => R.DB -> m (Maybe LogID)
+generateLogId :: MonadIO m => R.DB -> MaybeT m LogID
 generateLogId metaDb =
   do
     oldId <- R.get metaDb def maxLogIdKey
     case oldId of
       Nothing -> do
         R.put metaDb def maxLogIdKey (serialize (1 :: Word64))
-        return $ Just 1
+        return 1
       Just oid -> updateLogId oid
   where
     maxLogIdKey = "maxLogId"
     updateLogId oldId =
       do
         R.put metaDb def maxLogIdKey (serialize newLogId)
-        return $ Just $ newLogId
+        return newLogId
       where
         newLogId :: Word64
         newLogId = (deserialize oldId) + 1
@@ -189,57 +188,50 @@ data Context
 
 -- | open a log, will return a LogHandle for later operation
 -- | (such as append and read)
-open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m (Maybe LogHandle)
+open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context (MaybeT m) LogHandle
 open name op@OpenOptions {..} = do
   Context {metaDbHandle = mh, dataDbHandle = dh} <- ask
   logId <- R.get mh def (serialize name)
   case logId of
     Nothing ->
       if createIfMissing
-        then do
-          newId <- generateLogId mh
-          liftIM1
-            newId
-            ( \id -> do
-                R.put mh def (serialize name) (serialize id)
-                -- init entryId to 0
-                R.put mh def (serialize id) (serialize (0 :: Word64))
-                return $
-                  Just
-                    LogHandle
-                      { logName = name,
-                        logID = id,
-                        openOptions = op,
-                        dataDb = dh,
-                        metaDb = mh
-                      }
-            )
-        else return Nothing
+        then lift $ do
+          id <- generateLogId mh
+          R.put mh def (serialize name) (serialize id)
+          -- init entryId to 0
+          R.put mh def (serialize id) (serialize (0 :: Word64))
+          return $
+            LogHandle
+              { logName = name,
+                logID = id,
+                openOptions = op,
+                dataDb = dh,
+                metaDb = mh
+              }
+        else lift $ MaybeT $ return Nothing
     Just id ->
       return $
-        Just
-          LogHandle
-            { logName = name,
-              logID = deserialize id,
-              openOptions = op,
-              dataDb = dh,
-              metaDb = mh
-            }
+        LogHandle
+          { logName = name,
+            logID = deserialize id,
+            openOptions = op,
+            dataDb = dh,
+            metaDb = mh
+          }
 
 -- | append an entry to log
-appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m (Maybe EntryID)
+appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context (MaybeT m) EntryID
 appendEntry lh@LogHandle {..} entry =
-  liftIO $
+  lift $
     if writeMode openOptions
       then do
         entryId <- generateEntryId metaDb logID
-        liftIM1 entryId saveEntry
-      else return Nothing
+        saveEntry entryId
+      else mzero
   where
-    saveEntry :: EntryID -> IO (Maybe EntryID)
     saveEntry id = do
       R.put dataDb def (generateKey logID id) entry
-      return $ Just id
+      return id
 
 -- | generate key used to append entry
 generateKey :: LogID -> EntryID -> ByteString
@@ -247,17 +239,17 @@ generateKey logId entryId = append (serialize logId) (serialize entryId)
 
 -- | generate entry Id
 -- |
-generateEntryId :: MonadIO m => R.DB -> LogID -> m (Maybe EntryID)
+generateEntryId :: MonadIO m => R.DB -> LogID -> MaybeT m EntryID
 generateEntryId metaDb logId =
   do
-    oldId <- R.get metaDb def maxEntryIdKey
-    liftIM1 oldId updateEntryId
+    oldId <- MaybeT (R.get metaDb def maxEntryIdKey)
+    updateEntryId oldId
   where
     maxEntryIdKey = serialize logId
     updateEntryId oldId =
       do
         R.put metaDb def maxEntryIdKey (serialize newEntryId)
-        return $ Just $ newEntryId
+        return newEntryId
       where
         newEntryId :: Word64
         newEntryId = (deserialize oldId) + 1
@@ -268,10 +260,10 @@ readEntries ::
   LogHandle ->
   EntryID ->
   EntryID ->
-  ReaderT Context m (Maybe (ConduitT () (Maybe Entry) IO ()))
-readEntries LogHandle {..} firstKey lastKey = liftIO $ do
-  source <- R.range dataDb first last
-  liftIM1 source (\s -> return $ Just (s .| mapC (fmap snd)))
+  ReaderT Context (MaybeT m) (ConduitT () (Maybe Entry) IO ())
+readEntries LogHandle {..} firstKey lastKey = lift $ do
+  source <- MaybeT (R.range dataDb first last)
+  return (source .| mapC (fmap snd))
   where
     first = generateKey logID firstKey
     last = generateKey logID lastKey
@@ -296,7 +288,7 @@ shutDown = do
 -- | function that wrap initialize and resource release.
 -- | It is recommended to make open/append/read operations through this function.
 -- |
-withLogStore :: MonadUnliftIO m => Config -> ReaderT Context (ResourceT m) a -> m a
+withLogStore :: MonadUnliftIO m => Config -> ReaderT Context (MaybeT m) a -> m (Maybe a)
 withLogStore cfg r =
   runResourceT
     ( do
@@ -304,33 +296,5 @@ withLogStore cfg r =
           allocate
             (initialize $ UserDefinedEnv cfg)
             (runReaderT shutDown)
-        runReaderT r ctx
+        runReaderT (mapReaderT (lift . runMaybeT) r) ctx
     )
-
--- | helper functions to simplify code
--- |
-liftIM1 :: MonadIO m => Maybe a -> (a -> m (Maybe b)) -> m (Maybe b)
-liftIM1 Nothing _ = return Nothing
-liftIM1 (Just a) f = f a
-
-liftIM2 ::
-  MonadIO m =>
-  Maybe a ->
-  Maybe b ->
-  (a -> b -> m (Maybe c)) ->
-  m (Maybe c)
-liftIM2 Nothing _ _ = return Nothing
-liftIM2 _ Nothing _ = return Nothing
-liftIM2 (Just a) (Just b) f = f a b
-
-liftIM3 ::
-  MonadIO m =>
-  Maybe a ->
-  Maybe b ->
-  Maybe c ->
-  (a -> b -> c -> m (Maybe d)) ->
-  m (Maybe d)
-liftIM3 Nothing _ _ _ = return Nothing
-liftIM3 _ Nothing _ _ = return Nothing
-liftIM3 _ _ Nothing _ = return Nothing
-liftIM3 (Just a) (Just b) (Just c) f = f a b c
