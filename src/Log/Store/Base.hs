@@ -1,4 +1,5 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
@@ -47,6 +48,7 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.Default (def)
 import Data.Word
 import qualified Database.RocksDB as R
+import GHC.Generics (Generic)
 import System.FilePath.Posix ((</>))
 
 -- | Log name
@@ -70,6 +72,17 @@ type Entry = ByteString
 
 -- | entry Id
 type EntryID = Word64
+
+-- | entry content with some meta info
+-- |
+data InnerEntry
+  = InnerEntry
+      { content :: Entry,
+        entryID :: EntryID
+      }
+  deriving (Generic)
+
+instance Binary InnerEntry
 
 -- | open options
 data OpenOptions
@@ -230,7 +243,7 @@ appendEntry lh@LogHandle {..} entry =
       else mzero
   where
     saveEntry id = do
-      R.put dataDb def (generateKey logID id) entry
+      R.put dataDb def (generateKey logID id) (serialize InnerEntry {content = entry, entryID = id})
       return id
 
 -- | generate key used to append entry
@@ -252,7 +265,7 @@ generateEntryId metaDb logId =
         return newEntryId
       where
         newEntryId :: Word64
-        newEntryId = (deserialize oldId) + 1
+        newEntryId = deserialize oldId + 1
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
 -- |
@@ -262,10 +275,10 @@ readEntries ::
   LogHandle ->
   Maybe EntryID ->
   Maybe EntryID ->
-  ReaderT Context (MaybeT m) (ConduitT () (Maybe Entry) IO ())
+  ReaderT Context (MaybeT m) (ConduitT () (Maybe (Entry, EntryID)) IO ())
 readEntries LogHandle {..} firstKey lastKey = lift $ do
   source <- MaybeT (R.range dataDb first last)
-  return (source .| mapC (fmap snd))
+  return (source .| mapC (fmap snd) .| mapC (fmap (deserialize :: ByteString -> InnerEntry)) .| mapC (fmap (\e -> (content e, entryID e))))
   where
     first =
       case firstKey of

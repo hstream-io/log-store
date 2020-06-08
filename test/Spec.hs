@@ -118,7 +118,7 @@ main = hspec $ do
                 liftIO $ runConduit $ source .| sinkList
             )
         )
-          `shouldReturn` (Just ([Just "entry"]))
+          `shouldReturn` (Just ([Just ("entry", 1)]))
       it "put some entries to a log and read them" $
         ( withLogStoreTest
             ( do
@@ -133,7 +133,7 @@ main = hspec $ do
                 liftIO $ runConduit $ source .| sinkList
             )
         )
-          `shouldReturn` Just [Just "entry1", Just "entry2", Just "entry3"]
+          `shouldReturn` Just [Just ("entry1", 1), Just ("entry2", 2), Just ("entry3", 3)]
       it "put some entries to multiple logs and read them" $
         ( withLogStoreTest
             ( do
@@ -172,9 +172,9 @@ main = hspec $ do
             )
         )
           `shouldReturn` Just
-            [ [Just "log1-entry1", Just "log1-entry2", Just "log1-entry3"],
-              [Just "log2-entry1", Just "log2-entry2", Just "log2-entry3"],
-              [Just "log3-entry1", Just "log3-entry2", Just "log3-entry3"]
+            [ [Just ("log1-entry1", 1), Just ("log1-entry2", 2), Just ("log1-entry3", 3)],
+              [Just ("log2-entry1", 1), Just ("log2-entry2", 2), Just ("log2-entry3", 3)],
+              [Just ("log3-entry1", 1), Just ("log3-entry2", 2), Just ("log3-entry3", 3)]
             ]
       it "put many entries to a log" $
         ( withLogStoreTest
