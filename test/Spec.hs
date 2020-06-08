@@ -114,7 +114,7 @@ main = hspec $ do
                     "log"
                     defaultOpenOptions {writeMode = True, createIfMissing = True}
                 entryId <- appendEntry logHandle "entry"
-                source <- readEntries logHandle entryId entryId
+                source <- readEntries logHandle Nothing Nothing
                 liftIO $ runConduit $ source .| sinkList
             )
         )
@@ -129,7 +129,7 @@ main = hspec $ do
                 entryId1 <- appendEntry logHandle "entry1"
                 entryId2 <- appendEntry logHandle "entry2"
                 entryId3 <- appendEntry logHandle "entry3"
-                source <- readEntries logHandle entryId1 entryId3
+                source <- readEntries logHandle Nothing Nothing
                 liftIO $ runConduit $ source .| sinkList
             )
         )
@@ -158,11 +158,11 @@ main = hspec $ do
                 log3EntryId1 <- appendEntry lh3 "log3-entry1"
                 log3EntryId2 <- appendEntry lh3 "log3-entry2"
                 log3EntryId3 <- appendEntry lh3 "log3-entry3"
-                source1 <- readEntries lh1 log1EntryId1 log1EntryId3
+                source1 <- readEntries lh1 Nothing Nothing
                 r1 <- liftIO $ runConduit $ source1 .| sinkList
-                source2 <- readEntries lh2 log2EntryId1 log2EntryId3
+                source2 <- readEntries lh2 Nothing Nothing
                 r2 <- liftIO $ runConduit $ source2 .| sinkList
-                source3 <- readEntries lh3 log3EntryId1 log3EntryId3
+                source3 <- readEntries lh3 Nothing Nothing
                 r3 <- liftIO $ runConduit $ source3 .| sinkList
                 return
                   [ r1,

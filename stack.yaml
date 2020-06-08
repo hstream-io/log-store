@@ -67,4 +67,4 @@ packages:
 
 extra-deps:
 - github: daleiz/rocksdb-haskell
-  commit: 34cb367d4dae0de50e3aa959d2cce1f644554952
+  commit: 109af08f95b40f458d4933e3725ecb3e59337c39

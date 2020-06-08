@@ -170,7 +170,7 @@ generateLogId metaDb =
         return newLogId
       where
         newLogId :: Word64
-        newLogId = (deserialize oldId) + 1
+        newLogId = deserialize oldId + 1
 
 -- | serialize logId/entryId
 serialize :: Binary b => b -> ByteString
@@ -255,18 +255,26 @@ generateEntryId metaDb logId =
         newEntryId = (deserialize oldId) + 1
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
+-- |
+-- |
 readEntries ::
   MonadIO m =>
   LogHandle ->
-  EntryID ->
-  EntryID ->
+  Maybe EntryID ->
+  Maybe EntryID ->
   ReaderT Context (MaybeT m) (ConduitT () (Maybe Entry) IO ())
 readEntries LogHandle {..} firstKey lastKey = lift $ do
   source <- MaybeT (R.range dataDb first last)
   return (source .| mapC (fmap snd))
   where
-    first = generateKey logID firstKey
-    last = generateKey logID lastKey
+    first =
+      case firstKey of
+        Nothing -> Just $ generateKey logID 0
+        Just k -> Just $ generateKey logID k
+    last =
+      case lastKey of
+        Nothing -> Just $ generateKey logID 0xffffffff
+        Just k -> Just $ generateKey logID k
 
 -- | close log
 -- |
