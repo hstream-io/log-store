@@ -286,7 +286,7 @@ readEntries LogHandle {..} firstKey lastKey = lift $ do
         Just k -> Just $ generateKey logID k
     last =
       case lastKey of
-        Nothing -> Just $ generateKey logID 0xffffffff
+        Nothing -> Just $ generateKey logID 0xffffffffffffffff
         Just k -> Just $ generateKey logID k
 
 -- | close log
