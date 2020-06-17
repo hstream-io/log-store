@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 9ed4e8bd06d0007d3f744fb6b3ffc1e331f2dac6dd96af19d7c4a932209169e3
+-- hash: 31e0d0b021f9c668a750cdc2e0c5b54afabc98d9cdfff76a95d50e28ddf0fcf1
 
 name:           log-store
 version:        0.1.0.0
@@ -32,17 +32,18 @@ library
       Paths_log_store
   hs-source-dirs:
       src
+  ghc-options: -W
   build-depends:
       base >=4.7 && <5
     , binary
     , bytestring
-    , conduit
     , data-default
     , directory
     , filepath
     , mtl
     , resourcet
-    , rocksdb-haskell
+    , rocksdb-haskell-bindings
+    , streamly
     , transformers
   default-language: Haskell2010
 
@@ -59,7 +60,6 @@ test-suite log-store-test
     , base >=4.7 && <5
     , binary
     , bytestring
-    , conduit
     , data-default
     , directory
     , filepath
@@ -68,7 +68,8 @@ test-suite log-store-test
     , log-store
     , mtl
     , resourcet
-    , rocksdb-haskell
+    , rocksdb-haskell-bindings
+    , streamly
     , temporary-resourcet
     , transformers
   default-language: Haskell2010

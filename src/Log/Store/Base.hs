@@ -32,23 +32,21 @@ module Log.Store.Base
   )
 where
 
-import Conduit ((.|), Conduit, ConduitT, mapC)
-import Control.Exception (bracket)
-import Control.Monad (mzero, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
-import Control.Monad.Trans.Maybe (MaybeT (..))
-import Control.Monad.Trans.Reader (mapReaderT)
-import Control.Monad.Trans.Resource (MonadResource, MonadUnliftIO, ResourceT, allocate, runResourceT)
+import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import Data.Binary (Binary)
 import qualified Data.Binary as Binary
 import Data.ByteString (ByteString, append)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Default (def)
+import Data.Function ((&))
 import Data.Word
 import qualified Database.RocksDB as R
 import GHC.Generics (Generic)
+import Streamly (Serial)
+import qualified Streamly.Prelude as S
 import System.FilePath.Posix ((</>))
 
 -- | Log name
@@ -62,9 +60,7 @@ data LogHandle
   = LogHandle
       { logName :: LogName,
         logID :: LogID,
-        openOptions :: OpenOptions,
-        metaDb :: R.DB,
-        dataDb :: R.DB
+        openOptions :: OpenOptions
       }
 
 -- | entry which will be appended to a log
@@ -108,47 +104,33 @@ dataDbDir = "data"
 metaDbDir :: FilePath
 metaDbDir = "meta"
 
-dataDbKey :: String
-dataDbKey = "data"
-
-metaDbKey :: String
-metaDbKey = "meta"
-
-dataDbPath :: Config -> FilePath
-dataDbPath Config {..} = rootDbPath </> dataDbDir
-
-metaDbPath :: Config -> FilePath
-metaDbPath Config {..} = rootDbPath </> metaDbDir
-
--- | init Config
--- |
-initConfig :: MonadIO m => Env -> m Config
-initConfig DefaultEnv = return defaultConfig
-initConfig (UserDefinedEnv config) = return config
-
 -- | init
 --
--- | 1. init config
+-- | 1. get config
 -- | 2. create db path if necessary
 -- | 3. return db handles
 -- |
 initialize :: MonadIO m => Env -> m Context
-initialize env = liftIO $ do
-  cfg@Config {..} <- initConfig env
-  dataDb <-
-    R.open
-      (rootDbPath </> dataDbDir)
-      R.defaultOptions
-        { R.createIfMissing = True
-        }
-  metaDb <-
-    R.open
-      (rootDbPath </> metaDbDir)
-      R.defaultOptions
-        { R.createIfMissing = True,
-          R.mergeOperator = R.UInt64Add
-        }
-  return Context {metaDbHandle = metaDb, dataDbHandle = dataDb}
+initialize env =
+  liftIO $ do
+    dataDb <-
+      R.open
+        R.defaultDBOptions
+          { R.createIfMissing = True
+          }
+        (rootPath </> dataDbDir)
+    metaDb <-
+      R.open
+        R.defaultDBOptions
+          { R.createIfMissing = True
+          }
+        (rootPath </> metaDbDir)
+    return Context {metaDbHandle = metaDb, dataDbHandle = dataDb}
+  where
+    rootPath =
+      case env of
+        DefaultEnv -> rootDbPath defaultConfig
+        UserDefinedEnv cfg -> rootDbPath cfg
 
 data Env
   = DefaultEnv
@@ -166,7 +148,7 @@ defaultConfig =
 -- |
 -- | todo:
 -- | exception need to consider
-generateLogId :: MonadIO m => R.DB -> MaybeT m LogID
+generateLogId :: MonadIO m => R.DB -> m LogID
 generateLogId metaDb =
   do
     oldId <- R.get metaDb def maxLogIdKey
@@ -201,49 +183,45 @@ data Context
 
 -- | open a log, will return a LogHandle for later operation
 -- | (such as append and read)
-open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context (MaybeT m) LogHandle
+open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
 open name op@OpenOptions {..} = do
-  Context {metaDbHandle = mh, dataDbHandle = dh} <- ask
-  logId <- R.get mh def (serialize name)
+  Context {..} <- ask
+  logId <- R.get metaDbHandle def (serialize name)
   case logId of
     Nothing ->
       if createIfMissing
         then lift $ do
-          id <- generateLogId mh
-          R.put mh def (serialize name) (serialize id)
+          id <- generateLogId metaDbHandle
+          R.put metaDbHandle def (serialize name) (serialize id)
           -- init entryId to 0
-          R.put mh def (serialize id) (serialize (0 :: Word64))
+          R.put metaDbHandle def (serialize id) (serialize (0 :: Word64))
           return $
             LogHandle
               { logName = name,
                 logID = id,
-                openOptions = op,
-                dataDb = dh,
-                metaDb = mh
+                openOptions = op
               }
-        else lift $ MaybeT $ return Nothing
+        else liftIO $ ioError $ userError $ "no log named " ++ name ++ " found"
     Just id ->
       return $
         LogHandle
           { logName = name,
             logID = deserialize id,
-            openOptions = op,
-            dataDb = dh,
-            metaDb = mh
+            openOptions = op
           }
 
 -- | append an entry to log
-appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context (MaybeT m) EntryID
-appendEntry lh@LogHandle {..} entry =
-  lift $
-    if writeMode openOptions
-      then do
-        entryId <- generateEntryId metaDb logID
-        saveEntry entryId
-      else mzero
+appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m EntryID
+appendEntry LogHandle {..} entry = do
+  Context {..} <- ask
+  if writeMode openOptions
+    then do
+      entryId <- generateEntryId metaDbHandle logID
+      saveEntry dataDbHandle entryId
+    else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
   where
-    saveEntry id = do
-      R.put dataDb def (generateKey logID id) (serialize InnerEntry {content = entry, entryID = id})
+    saveEntry db id = do
+      R.put db def (generateKey logID id) (serialize InnerEntry {content = entry, entryID = id})
       return id
 
 -- | generate key used to append entry
@@ -252,11 +230,13 @@ generateKey logId entryId = append (serialize logId) (serialize entryId)
 
 -- | generate entry Id
 -- |
-generateEntryId :: MonadIO m => R.DB -> LogID -> MaybeT m EntryID
+generateEntryId :: MonadIO m => R.DB -> LogID -> m EntryID
 generateEntryId metaDb logId =
   do
-    oldId <- MaybeT (R.get metaDb def maxEntryIdKey)
-    updateEntryId oldId
+    oldId <- R.get metaDb def maxEntryIdKey
+    case oldId of
+      Nothing -> liftIO $ ioError $ userError "data corrupt"
+      Just oid -> updateEntryId oid
   where
     maxEntryIdKey = serialize logId
     updateEntryId oldId =
@@ -275,10 +255,11 @@ readEntries ::
   LogHandle ->
   Maybe EntryID ->
   Maybe EntryID ->
-  ReaderT Context (MaybeT m) (ConduitT () (Maybe (Entry, EntryID)) IO ())
-readEntries LogHandle {..} firstKey lastKey = lift $ do
-  source <- MaybeT (R.range dataDb first last)
-  return (source .| mapC (fmap snd) .| mapC (fmap (deserialize :: ByteString -> InnerEntry)) .| mapC (fmap (\e -> (content e, entryID e))))
+  ReaderT Context m (Serial (Entry, EntryID))
+readEntries LogHandle {..} firstKey lastKey = do
+  Context {..} <- ask
+  let kvStream = R.range dataDbHandle R.defaultReadOptions first last
+  return $ kvStream & S.map snd & S.map (deserialize :: ByteString -> InnerEntry) & S.map (\e -> (content e, entryID e))
   where
     first =
       case firstKey of
@@ -307,9 +288,8 @@ shutDown = do
   R.close dataDbHandle
 
 -- | function that wrap initialize and resource release.
--- | It is recommended to make open/append/read operations through this function.
 -- |
-withLogStore :: MonadUnliftIO m => Config -> ReaderT Context (MaybeT m) a -> m (Maybe a)
+withLogStore :: MonadUnliftIO m => Config -> ReaderT Context m a -> m a
 withLogStore cfg r =
   runResourceT
     ( do
@@ -317,5 +297,5 @@ withLogStore cfg r =
           allocate
             (initialize $ UserDefinedEnv cfg)
             (runReaderT shutDown)
-        runReaderT (mapReaderT (lift . runMaybeT) r) ctx
+        lift $ runReaderT r ctx
     )
