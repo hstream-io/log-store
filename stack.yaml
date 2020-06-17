@@ -66,5 +66,5 @@ packages:
 # compiler-check: newer-minor
 
 extra-deps:
-- github: daleiz/rocksdb-haskell-bindings
+- github: hstream-io/haskell-rocksdb-bindings
   commit: e62ed5d0f4d9eedd56ae01c49185a06465ba3eb3
