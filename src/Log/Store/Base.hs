@@ -47,7 +47,6 @@ import qualified Database.RocksDB as R
 import GHC.Generics (Generic)
 import Streamly (Serial)
 import qualified Streamly.Prelude as S
-import System.FilePath.Posix ((</>))
 
 -- | Log name
 type LogName = String
@@ -98,34 +97,33 @@ defaultOpenOptions =
 -- | Config info
 newtype Config = Config {rootDbPath :: FilePath}
 
-dataDbDir :: FilePath
-dataDbDir = "data"
+dataCFName :: String
+dataCFName = "data"
 
-metaDbDir :: FilePath
-metaDbDir = "meta"
+metaCFName :: String
+metaCFName = "meta"
 
 -- | init
 --
 -- | 1. get config
 -- | 2. create db path if necessary
--- | 3. return db handles
+-- | 3. return db and cf handles
 -- |
 initialize :: MonadIO m => Env -> m Context
 initialize env =
   liftIO $ do
-    dataDb <-
-      R.open
+    (db, [defaultCF, metaCF, dataCF]) <-
+      R.openColumnFamilies
         R.defaultDBOptions
-          { R.createIfMissing = True
+          { R.createIfMissing = True,
+            R.createMissingColumnFamilies = True
           }
-        (rootPath </> dataDbDir)
-    metaDb <-
-      R.open
-        R.defaultDBOptions
-          { R.createIfMissing = True
-          }
-        (rootPath </> metaDbDir)
-    return Context {metaDbHandle = metaDb, dataDbHandle = dataDb}
+        rootPath
+        [ R.ColumnFamilyDescriptor {name = "default", options = R.defaultDBOptions},
+          R.ColumnFamilyDescriptor {name = metaCFName, options = R.defaultDBOptions},
+          R.ColumnFamilyDescriptor {name = dataCFName, options = R.defaultDBOptions}
+        ]
+    return Context {dbHandle = db, defaultCFHandle = defaultCF, metaCFHandle = metaCF, dataCFHandle = dataCF}
   where
     rootPath =
       case env of
@@ -148,20 +146,20 @@ defaultConfig =
 -- |
 -- | todo:
 -- | exception need to consider
-generateLogId :: MonadIO m => R.DB -> m LogID
-generateLogId metaDb =
+generateLogId :: MonadIO m => R.DB -> R.ColumnFamily -> m LogID
+generateLogId db cf =
   do
-    oldId <- R.get metaDb def maxLogIdKey
+    oldId <- R.getCF db def cf maxLogIdKey
     case oldId of
       Nothing -> do
-        R.put metaDb def maxLogIdKey (serialize (1 :: Word64))
+        R.putCF db def cf maxLogIdKey (serialize (1 :: Word64))
         return 1
       Just oid -> updateLogId oid
   where
     maxLogIdKey = "maxLogId"
     updateLogId oldId =
       do
-        R.put metaDb def maxLogIdKey (serialize newLogId)
+        R.putCF db def cf maxLogIdKey (serialize newLogId)
         return newLogId
       where
         newLogId :: Word64
@@ -177,8 +175,10 @@ deserialize = Binary.decode . BSL.fromStrict
 
 data Context
   = Context
-      { metaDbHandle :: R.DB,
-        dataDbHandle :: R.DB
+      { dbHandle :: R.DB,
+        defaultCFHandle :: R.ColumnFamily,
+        metaCFHandle :: R.ColumnFamily,
+        dataCFHandle :: R.ColumnFamily
       }
 
 -- | open a log, will return a LogHandle for later operation
@@ -186,15 +186,15 @@ data Context
 open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
 open name op@OpenOptions {..} = do
   Context {..} <- ask
-  logId <- R.get metaDbHandle def (serialize name)
+  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
   case logId of
     Nothing ->
       if createIfMissing
         then lift $ do
-          id <- generateLogId metaDbHandle
-          R.put metaDbHandle def (serialize name) (serialize id)
+          id <- generateLogId dbHandle metaCFHandle
+          R.putCF dbHandle def metaCFHandle (serialize name) (serialize id)
           -- init entryId to 0
-          R.put metaDbHandle def (serialize id) (serialize (0 :: Word64))
+          R.putCF dbHandle def metaCFHandle (serialize id) (serialize (0 :: Word64))
           return $
             LogHandle
               { logName = name,
@@ -216,12 +216,12 @@ appendEntry LogHandle {..} entry = do
   Context {..} <- ask
   if writeMode openOptions
     then do
-      entryId <- generateEntryId metaDbHandle logID
-      saveEntry dataDbHandle entryId
+      entryId <- generateEntryId dbHandle metaCFHandle logID
+      saveEntry dbHandle dataCFHandle entryId
     else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
   where
-    saveEntry db id = do
-      R.put db def (generateKey logID id) (serialize InnerEntry {content = entry, entryID = id})
+    saveEntry db cf id = do
+      R.putCF db def cf (generateKey logID id) (serialize InnerEntry {content = entry, entryID = id})
       return id
 
 -- | generate key used to append entry
@@ -230,10 +230,10 @@ generateKey logId entryId = append (serialize logId) (serialize entryId)
 
 -- | generate entry Id
 -- |
-generateEntryId :: MonadIO m => R.DB -> LogID -> m EntryID
-generateEntryId metaDb logId =
+generateEntryId :: MonadIO m => R.DB -> R.ColumnFamily -> LogID -> m EntryID
+generateEntryId db cf logId =
   do
-    oldId <- R.get metaDb def maxEntryIdKey
+    oldId <- R.getCF db def cf maxEntryIdKey
     case oldId of
       Nothing -> liftIO $ ioError $ userError "data corrupt"
       Just oid -> updateEntryId oid
@@ -241,7 +241,7 @@ generateEntryId metaDb logId =
     maxEntryIdKey = serialize logId
     updateEntryId oldId =
       do
-        R.put metaDb def maxEntryIdKey (serialize newEntryId)
+        R.putCF db def cf maxEntryIdKey (serialize newEntryId)
         return newEntryId
       where
         newEntryId :: Word64
@@ -258,7 +258,7 @@ readEntries ::
   ReaderT Context m (Serial (Entry, EntryID))
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
-  let kvStream = R.range dataDbHandle R.defaultReadOptions first last
+  let kvStream = R.rangeCF dbHandle def dataCFHandle first last
   return $ kvStream & S.map snd & S.map (deserialize :: ByteString -> InnerEntry) & S.map (\e -> (content e, entryID e))
   where
     first =
@@ -284,8 +284,10 @@ close LogHandle {..} = return ()
 shutDown :: MonadIO m => ReaderT Context m ()
 shutDown = do
   Context {..} <- ask
-  R.close metaDbHandle
-  R.close dataDbHandle
+  R.destroyColumnFamily defaultCFHandle
+  R.destroyColumnFamily metaCFHandle
+  R.destroyColumnFamily dataCFHandle
+  R.close dbHandle
 
 -- | function that wrap initialize and resource release.
 -- |
