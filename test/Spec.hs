@@ -13,6 +13,7 @@ import Log.Store.Base
     Env (..),
     LogHandle (..),
     appendEntry,
+    create,
     createIfMissing,
     defaultOpenOptions,
     initialize,
@@ -34,6 +35,15 @@ import Test.Hspec
 main :: IO ()
 main = hspec $ describe "Basic Functionality" $
   do
+    it "create logs" $
+      withLogStoreTest
+        ( do
+            log1 <- create "log1"
+            log2 <- create "log2"
+            log3 <- create "log3"
+            return [log1, log2, log3]
+        )
+        `shouldReturn` [1, 2, 3]
     it "put an entry to a log" $
       withLogStoreTest
         ( do
