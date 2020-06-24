@@ -16,6 +16,7 @@ module Log.Store.Base
 
     -- * Basic functions
     initialize,
+    create,
     open,
     appendEntry,
     readEntries,
@@ -42,6 +43,8 @@ import Data.ByteString (ByteString, append)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Default (def)
 import Data.Function ((&))
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Maybe (isJust)
 import Data.Word
 import qualified Database.RocksDB as R
 import GHC.Generics (Generic)
@@ -59,7 +62,8 @@ data LogHandle
   = LogHandle
       { logName :: LogName,
         logID :: LogID,
-        openOptions :: OpenOptions
+        openOptions :: OpenOptions,
+        maxEntryIdRef :: IORef EntryID
       }
 
 -- | entry which will be appended to a log
@@ -190,25 +194,64 @@ open name op@OpenOptions {..} = do
   case logId of
     Nothing ->
       if createIfMissing
-        then lift $ do
-          id <- generateLogId dbHandle metaCFHandle
-          R.putCF dbHandle def metaCFHandle (serialize name) (serialize id)
-          -- init entryId to 0
-          R.putCF dbHandle def metaCFHandle (serialize id) (serialize (0 :: Word64))
+        then do
+          id <- create name
+          maxEntryIdRef <- liftIO $ newIORef (0 :: EntryID)
           return $
             LogHandle
               { logName = name,
                 logID = id,
-                openOptions = op
+                openOptions = op,
+                maxEntryIdRef = maxEntryIdRef
               }
         else liftIO $ ioError $ userError $ "no log named " ++ name ++ " found"
     Just id ->
-      return $
-        LogHandle
-          { logName = name,
-            logID = deserialize id,
-            openOptions = op
-          }
+      do
+        maxEntryId <- getMaxEntryId (deserialize id)
+        maxEntryIdRef <- liftIO $ newIORef maxEntryId
+        return $
+          LogHandle
+            { logName = name,
+              logID = deserialize id,
+              openOptions = op,
+              maxEntryIdRef = maxEntryIdRef
+            }
+
+getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m EntryID
+getMaxEntryId logId = do
+  Context {..} <- ask
+  R.withIteratorCF dbHandle def dataCFHandle findMaxEntryId
+  where
+    findMaxEntryId iterator = do
+      R.seekForPrev iterator (generateKey logId 0xffffffffffffffff)
+      isValid <- R.valid iterator
+      if isValid
+        then do
+          keyByteString <- R.key iterator
+          return $ deserialize keyByteString
+        else do
+          errStr <- R.getError iterator
+          case errStr of
+            Nothing -> ioError $ userError "getMaxEntryId occurs error"
+            Just str -> ioError $ userError $ "getMaxEntryId error: " ++ str
+
+exists :: MonadIO m => LogName -> ReaderT Context m Bool
+exists name = do
+  Context {..} <- ask
+  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
+  return $ isJust logId
+
+create :: MonadIO m => LogName -> ReaderT Context m LogID
+create name = do
+  flag <- exists name
+  if flag
+    then liftIO $ ioError $ userError $ "log " ++ name ++ " already existed"
+    else do
+      Context {..} <- ask
+      id <- generateLogId dbHandle metaCFHandle
+      R.putCF dbHandle def metaCFHandle (serialize name) (serialize id)
+      R.putCF dbHandle def metaCFHandle (serialize id) (serialize (0 :: Word64))
+      return id
 
 -- | append an entry to log
 appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m EntryID
@@ -216,7 +259,7 @@ appendEntry LogHandle {..} entry = do
   Context {..} <- ask
   if writeMode openOptions
     then do
-      entryId <- generateEntryId dbHandle metaCFHandle logID
+      entryId <- generateEntryId maxEntryIdRef
       saveEntry dbHandle dataCFHandle entryId
     else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
   where
@@ -230,22 +273,13 @@ generateKey logId entryId = append (serialize logId) (serialize entryId)
 
 -- | generate entry Id
 -- |
-generateEntryId :: MonadIO m => R.DB -> R.ColumnFamily -> LogID -> m EntryID
-generateEntryId db cf logId =
+generateEntryId :: MonadIO m => IORef EntryID -> m EntryID
+generateEntryId entryIdRef = liftIO $
   do
-    oldId <- R.getCF db def cf maxEntryIdKey
-    case oldId of
-      Nothing -> liftIO $ ioError $ userError "data corrupt"
-      Just oid -> updateEntryId oid
-  where
-    maxEntryIdKey = serialize logId
-    updateEntryId oldId =
-      do
-        R.putCF db def cf maxEntryIdKey (serialize newEntryId)
-        return newEntryId
-      where
-        newEntryId :: Word64
-        newEntryId = deserialize oldId + 1
+    oldId <- readIORef entryIdRef
+    let newId = oldId + 1
+    writeIORef entryIdRef newId
+    return newId
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
 -- |
