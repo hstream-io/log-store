@@ -54,3 +54,17 @@ tests:
     - QuickCheck
     - temporary-resourcet
 
+benchmarks:
+  log-store-benchmark:
+    main:                Bench.hs
+    source-dirs:         bench
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+      - -fprof-auto
+    dependencies:
+      - log-store
+      - criterion
+      - temporary-resourcet
+
