@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: bc1f2ee44e304a821ed35d35a8d172c97d27a2affb63e1d7a57926a66247caa7
+-- hash: 8ea691c87b1955a653963589aec452a4c81e87635f984366f5cf3d97d20642ba
 
 name:           log-store
 version:        0.1.0.0
@@ -35,7 +35,6 @@ library
   ghc-options: -W
   build-depends:
       base >=4.7 && <5
-    , binary
     , bytestring
     , data-default
     , directory
@@ -43,6 +42,7 @@ library
     , mtl
     , resourcet
     , rocksdb-haskell-bindings
+    , store
     , streamly
     , transformers
   default-language: Haskell2010
@@ -58,7 +58,6 @@ test-suite log-store-test
   build-depends:
       QuickCheck
     , base >=4.7 && <5
-    , binary
     , bytestring
     , data-default
     , directory
@@ -69,6 +68,7 @@ test-suite log-store-test
     , mtl
     , resourcet
     , rocksdb-haskell-bindings
+    , store
     , streamly
     , temporary-resourcet
     , transformers
@@ -84,7 +84,6 @@ benchmark log-store-benchmark
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -fprof-auto
   build-depends:
       base >=4.7 && <5
-    , binary
     , bytestring
     , criterion
     , data-default
@@ -94,6 +93,7 @@ benchmark log-store-benchmark
     , mtl
     , resourcet
     , rocksdb-haskell-bindings
+    , store
     , streamly
     , temporary-resourcet
     , transformers

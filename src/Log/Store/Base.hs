@@ -26,25 +26,20 @@ module Log.Store.Base
 
     -- * Options
     defaultOpenOptions,
-
-    -- * utils
-    serialize,
-    deserialize,
   )
 where
 
+import Control.Exception (throw)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
-import Data.Binary (Binary)
-import qualified Data.Binary as Binary
-import Data.ByteString (ByteString, append)
-import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString as B (ByteString, append)
 import Data.Default (def)
 import Data.Function ((&))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
+import Data.Store (Store, decode, encode)
 import Data.Word
 import qualified Database.RocksDB as R
 import GHC.Generics (Generic)
@@ -58,38 +53,35 @@ type LogName = String
 type LogID = Word64
 
 -- | LogHandle
-data LogHandle
-  = LogHandle
-      { logName :: LogName,
-        logID :: LogID,
-        openOptions :: OpenOptions,
-        maxEntryIdRef :: IORef EntryID
-      }
+data LogHandle = LogHandle
+  { logName :: LogName,
+    logID :: LogID,
+    openOptions :: OpenOptions,
+    maxEntryIdRef :: IORef EntryID
+  }
 
 -- | entry which will be appended to a log
-type Entry = ByteString
+type Entry = B.ByteString
 
 -- | entry Id
 type EntryID = Word64
 
 -- | entry content with some meta info
 -- |
-data InnerEntry
-  = InnerEntry
-      { content :: Entry,
-        entryID :: EntryID
-      }
+data InnerEntry = InnerEntry
+  { entryID :: EntryID,
+    content :: Entry
+  }
   deriving (Generic)
 
-instance Binary InnerEntry
+instance Store InnerEntry
 
 -- | open options
-data OpenOptions
-  = OpenOptions
-      { readMode :: Bool,
-        writeMode :: Bool,
-        createIfMissing :: Bool
-      }
+data OpenOptions = OpenOptions
+  { readMode :: Bool,
+    writeMode :: Bool,
+    createIfMissing :: Bool
+  }
 
 defaultOpenOptions =
   OpenOptions
@@ -156,41 +148,32 @@ generateLogId db cf =
     oldId <- R.getCF db def cf maxLogIdKey
     case oldId of
       Nothing -> do
-        R.putCF db def cf maxLogIdKey (serialize (1 :: Word64))
+        R.putCF db def cf maxLogIdKey (encode (1 :: Word64))
         return 1
       Just oid -> updateLogId oid
   where
     maxLogIdKey = "maxLogId"
     updateLogId oldId =
       do
-        R.putCF db def cf maxLogIdKey (serialize newLogId)
+        R.putCF db def cf maxLogIdKey (encode newLogId)
         return newLogId
       where
         newLogId :: Word64
         newLogId = deserialize oldId + 1
 
--- | serialize logId/entryId
-serialize :: Binary b => b -> ByteString
-serialize = BSL.toStrict . Binary.encode
-
--- | deserialize logId/entryId
-deserialize :: Binary b => ByteString -> b
-deserialize = Binary.decode . BSL.fromStrict
-
-data Context
-  = Context
-      { dbHandle :: R.DB,
-        defaultCFHandle :: R.ColumnFamily,
-        metaCFHandle :: R.ColumnFamily,
-        dataCFHandle :: R.ColumnFamily
-      }
+data Context = Context
+  { dbHandle :: R.DB,
+    defaultCFHandle :: R.ColumnFamily,
+    metaCFHandle :: R.ColumnFamily,
+    dataCFHandle :: R.ColumnFamily
+  }
 
 -- | open a log, will return a LogHandle for later operation
 -- | (such as append and read)
 open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
 open name op@OpenOptions {..} = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
+  logId <- R.getCF dbHandle def metaCFHandle (encode name)
   case logId of
     Nothing ->
       if createIfMissing
@@ -238,7 +221,7 @@ getMaxEntryId logId = do
 exists :: MonadIO m => LogName -> ReaderT Context m Bool
 exists name = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
+  logId <- R.getCF dbHandle def metaCFHandle (encode name)
   return $ isJust logId
 
 create :: MonadIO m => LogName -> ReaderT Context m LogID
@@ -249,8 +232,8 @@ create name = do
     else do
       Context {..} <- ask
       id <- generateLogId dbHandle metaCFHandle
-      R.putCF dbHandle def metaCFHandle (serialize name) (serialize id)
-      R.putCF dbHandle def metaCFHandle (serialize id) (serialize (0 :: Word64))
+      R.putCF dbHandle def metaCFHandle (encode name) (encode id)
+      R.putCF dbHandle def metaCFHandle (encode id) (encode (0 :: Word64))
       return id
 
 -- | append an entry to log
@@ -264,12 +247,12 @@ appendEntry LogHandle {..} entry = do
     else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
   where
     saveEntry db cf id = do
-      R.putCF db def cf (generateKey logID id) (serialize InnerEntry {content = entry, entryID = id})
+      R.putCF db def cf (generateKey logID id) (encode InnerEntry {content = entry, entryID = id})
       return id
 
 -- | generate key used to append entry
-generateKey :: LogID -> EntryID -> ByteString
-generateKey logId entryId = append (serialize logId) (serialize entryId)
+generateKey :: LogID -> EntryID -> B.ByteString
+generateKey logId entryId = B.append (encode logId) (encode entryId)
 
 -- | generate entry Id
 -- |
@@ -293,7 +276,7 @@ readEntries ::
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
   let kvStream = R.rangeCF dbHandle def dataCFHandle first last
-  return $ kvStream & S.map snd & S.map (deserialize :: ByteString -> InnerEntry) & S.map (\e -> (content e, entryID e))
+  return $ kvStream & S.map snd & S.map (deserialize :: B.ByteString -> InnerEntry) & S.map (\e -> (content e, entryID e))
   where
     first =
       case firstKey of
@@ -335,3 +318,9 @@ withLogStore cfg r =
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )
+
+deserialize :: Store a => B.ByteString -> a
+deserialize bytes =
+  case decode bytes of
+    Left e -> throw e
+    Right v -> v
