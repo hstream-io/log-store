@@ -49,6 +49,16 @@ main = hspec $
               return [log1, log2, log3]
           )
           `shouldReturn` [1, 2, 3]
+      it "open an existent log" $
+        withLogStoreTest
+          ( do
+              create "log"
+              open
+                "log"
+                defaultOpenOptions {writeMode = True}
+              return "success"
+          )
+          `shouldReturn` "success"
       it "put an entry to a log" $
         withLogStoreTest
           ( do
@@ -165,17 +175,18 @@ main = hspec $
                            [("log2-entry1", 1), ("log2-entry2", 2), ("log2-entry3", 3)],
                            [("log3-entry1", 1), ("log3-entry2", 2), ("log3-entry3", 3)]
                          ]
-      it "append entries to a log" $
+      it "append entries to a log and read them " $
         withLogStoreTest
           ( do
               logHandle <-
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              ids <- appendEntries logHandle (V.replicate 3 (U.fromString "entry"))
-              return $ V.toList ids
+              appendEntries logHandle (V.replicate 3 (U.fromString "entry"))
+              s <- readEntries logHandle Nothing Nothing
+              liftIO $ S.toList s
           )
-          `shouldReturn` [1, 2, 3]
+          `shouldReturn` [("entry", 1), ("entry", 2), ("entry", 3)]
       it "append entry repeatly to a log" $
         withLogStoreTest
           ( do
@@ -186,6 +197,20 @@ main = hspec $
               appendEntryRepeat 4097 logHandle
           )
           `shouldReturn` 4097
+
+-- | append n entries to a log
+appendEntryRepeat n lh = append' 1
+  where
+    append' x =
+      if (x == n)
+        then do
+          id <- appendEntry lh "entry"
+          -- liftIO $ print id
+          return id
+        else do
+          id <- appendEntry lh "entry"
+          -- liftIO $ print id
+          append' (x + 1)
 
 -- | help run test case
 -- | wrap create temp directory
@@ -201,17 +226,3 @@ withLogStoreTest r =
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )
-
--- | append n entries to a log
-appendEntryRepeat n lh = append' 1
-  where
-    append' x =
-      if (x == n)
-        then do
-          id <- appendEntry lh "entry"
-          -- liftIO $ print id
-          return id
-        else do
-          id <- appendEntry lh "entry"
-          -- liftIO $ print id
-          append' (x + 1)
