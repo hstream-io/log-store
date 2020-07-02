@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 8ea691c87b1955a653963589aec452a4c81e87635f984366f5cf3d97d20642ba
+-- hash: 9c34e5ea01b425808b2c05b421f9ac951ca8b6232e53adfbe2dd07e2beb877a8
 
 name:           log-store
 version:        0.1.0.0
@@ -45,6 +45,7 @@ library
     , store
     , streamly
     , transformers
+    , vector
   default-language: Haskell2010
 
 test-suite log-store-test
@@ -72,6 +73,8 @@ test-suite log-store-test
     , streamly
     , temporary-resourcet
     , transformers
+    , utf8-string
+    , vector
   default-language: Haskell2010
 
 benchmark log-store-benchmark
@@ -97,4 +100,5 @@ benchmark log-store-benchmark
     , streamly
     , temporary-resourcet
     , transformers
+    , vector
   default-language: Haskell2010

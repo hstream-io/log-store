@@ -19,6 +19,7 @@ module Log.Store.Base
     create,
     open,
     appendEntry,
+    appendEntries,
     readEntries,
     close,
     shutDown,
@@ -40,6 +41,7 @@ import Data.Function ((&))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import Data.Store (Store, decode, encode)
+import Data.Vector (Vector, forM)
 import Data.Word
 import qualified Database.RocksDB as R
 import GHC.Generics (Generic)
@@ -249,6 +251,26 @@ appendEntry LogHandle {..} entry = do
     saveEntry db cf id = do
       R.putCF db def cf (generateKey logID id) (encode InnerEntry {content = entry, entryID = id})
       return id
+
+appendEntries :: MonadIO m => LogHandle -> Vector Entry -> ReaderT Context m (Vector EntryID)
+appendEntries LogHandle {..} entries = do
+  Context {..} <- ask
+  R.withWriteBatch $ appendEntries' dbHandle dataCFHandle
+  where
+    --appendEntries' :: R.DB -> R.ColumnFamily -> R.WriteBatch -> IO (Vector EntryID)
+    appendEntries' db cf batch = do
+      entryIds <-
+        forM
+          entries
+          batchAdd
+      R.write db def batch
+      return entryIds
+      where
+        --batchAdd :: Entry -> IO EntryID
+        batchAdd entry = do
+          entryId <- generateEntryId maxEntryIdRef
+          R.batchPutCF batch cf (generateKey logID entryId) entry
+          return entryId
 
 -- | generate key used to append entry
 generateKey :: LogID -> EntryID -> B.ByteString

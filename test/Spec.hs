@@ -7,11 +7,15 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.UTF8 as U
+import qualified Data.Vector as V
 import Log.Store.Base
   ( Config (..),
     Context,
     Env (..),
     LogHandle (..),
+    appendEntries,
     appendEntry,
     create,
     createIfMissing,
@@ -161,14 +165,25 @@ main = hspec $
                            [("log2-entry1", 1), ("log2-entry2", 2), ("log2-entry3", 3)],
                            [("log3-entry1", 1), ("log3-entry2", 2), ("log3-entry3", 3)]
                          ]
-      it "put many entries to a log" $
+      it "append entries to a log" $
         withLogStoreTest
           ( do
               logHandle <-
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              appendEntries 4097 logHandle
+              ids <- appendEntries logHandle (V.replicate 3 (U.fromString "entry"))
+              return $ V.toList ids
+          )
+          `shouldReturn` [1, 2, 3]
+      it "append entry repeatly to a log" $
+        withLogStoreTest
+          ( do
+              logHandle <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              appendEntryRepeat 4097 logHandle
           )
           `shouldReturn` 4097
 
@@ -188,7 +203,7 @@ withLogStoreTest r =
     )
 
 -- | append n entries to a log
-appendEntries n lh = append' 1
+appendEntryRepeat n lh = append' 1
   where
     append' x =
       if (x == n)
