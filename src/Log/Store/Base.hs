@@ -7,7 +7,7 @@ module Log.Store.Base
   ( -- * Exported Types
     LogName,
     OpenOptions (..),
-    LogHandle,
+    LogHandle (..),
     Entry,
     EntryID,
     Env (..),
@@ -26,7 +26,7 @@ module Log.Store.Base
     withLogStore,
 
     -- * Options
-    defaultOpenOptions,
+    defaultOpenOptions
   )
 where
 
@@ -35,7 +35,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
-import qualified Data.ByteString as B (ByteString, append)
+import qualified Data.ByteString as B
 import Data.Default (def)
 import Data.Function ((&))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -70,13 +70,15 @@ type EntryID = Word64
 
 -- | entry content with some meta info
 -- |
-data InnerEntry = InnerEntry
-  { entryID :: EntryID,
-    content :: Entry
-  }
-  deriving (Generic)
+data InnerEntry = InnerEntry EntryID Entry
+  deriving (Generic, Eq, Show)
 
 instance Store InnerEntry
+
+data EntryKey = EntryKey LogID EntryID
+  deriving (Generic, Eq, Show)
+
+instance Store EntryKey
 
 -- | open options
 data OpenOptions = OpenOptions
@@ -208,12 +210,13 @@ getMaxEntryId logId = do
   R.withIteratorCF dbHandle def dataCFHandle findMaxEntryId
   where
     findMaxEntryId iterator = do
-      R.seekForPrev iterator (generateKey logId 0xffffffffffffffff)
+      R.seekForPrev iterator (encode $ EntryKey logId 0xffffffffffffffff)
       isValid <- R.valid iterator
       if isValid
         then do
-          keyByteString <- R.key iterator
-          return $ deserialize keyByteString
+          entryKey <- R.key iterator
+          let (EntryKey _ entryId) = deserialize entryKey
+          return entryId
         else do
           errStr <- R.getError iterator
           case errStr of
@@ -233,10 +236,16 @@ create name = do
     then liftIO $ ioError $ userError $ "log " ++ name ++ " already existed"
     else do
       Context {..} <- ask
-      id <- generateLogId dbHandle metaCFHandle
-      R.putCF dbHandle def metaCFHandle (encode name) (encode id)
-      R.putCF dbHandle def metaCFHandle (encode id) (encode (0 :: Word64))
-      return id
+      R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle
+  where
+    initLog db metaCf dataCf batch = do
+      logId <- generateLogId db metaCf
+      R.batchPutCF batch metaCf (encode name) (encode logId)
+      R.batchPutCF batch dataCf (encode $ EntryKey logId startEntryId) (encode startEntryValue)
+      R.write db def batch
+      return logId
+    startEntryId = 0 :: Word64
+    startEntryValue = 0 :: Word64
 
 -- | append an entry to log
 appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m EntryID
@@ -245,19 +254,16 @@ appendEntry LogHandle {..} entry = do
   if writeMode openOptions
     then do
       entryId <- generateEntryId maxEntryIdRef
-      saveEntry dbHandle dataCFHandle entryId
+      let valueBstr = encode $ InnerEntry entryId entry
+      R.putCF dbHandle def dataCFHandle (encode $ EntryKey logID entryId) valueBstr
+      return entryId
     else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
-  where
-    saveEntry db cf id = do
-      R.putCF db def cf (generateKey logID id) (encode InnerEntry {content = entry, entryID = id})
-      return id
 
 appendEntries :: MonadIO m => LogHandle -> Vector Entry -> ReaderT Context m (Vector EntryID)
 appendEntries LogHandle {..} entries = do
   Context {..} <- ask
   R.withWriteBatch $ appendEntries' dbHandle dataCFHandle
   where
-    --appendEntries' :: R.DB -> R.ColumnFamily -> R.WriteBatch -> IO (Vector EntryID)
     appendEntries' db cf batch = do
       entryIds <-
         forM
@@ -266,15 +272,10 @@ appendEntries LogHandle {..} entries = do
       R.write db def batch
       return entryIds
       where
-        --batchAdd :: Entry -> IO EntryID
         batchAdd entry = do
           entryId <- generateEntryId maxEntryIdRef
-          R.batchPutCF batch cf (generateKey logID entryId) entry
+          R.batchPutCF batch cf (encode $ EntryKey logID entryId) (encode $ InnerEntry entryId entry)
           return entryId
-
--- | generate key used to append entry
-generateKey :: LogID -> EntryID -> B.ByteString
-generateKey logId entryId = B.append (encode logId) (encode entryId)
 
 -- | generate entry Id
 -- |
@@ -298,16 +299,18 @@ readEntries ::
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
   let kvStream = R.rangeCF dbHandle def dataCFHandle first last
-  return $ kvStream & S.map snd & S.map (deserialize :: B.ByteString -> InnerEntry) & S.map (\e -> (content e, entryID e))
+  return $ kvStream & S.map snd & S.map (deserialize :: B.ByteString -> InnerEntry) & S.map (\(InnerEntry entryId entry) -> (entry, entryId))
   where
     first =
       case firstKey of
-        Nothing -> Just $ generateKey logID 0
-        Just k -> Just $ generateKey logID k
+        Nothing -> Just $ encode $ EntryKey logID minEntryId
+        Just k -> Just $ encode $ EntryKey logID k
     last =
       case lastKey of
-        Nothing -> Just $ generateKey logID 0xffffffffffffffff
-        Just k -> Just $ generateKey logID k
+        Nothing -> Just $ encode $ EntryKey logID maxEntryId
+        Just k -> Just $ encode $ EntryKey logID k
+    minEntryId = 1 :: Word64
+    maxEntryId = 0xffffffffffffffff :: Word64
 
 -- | close log
 -- |
