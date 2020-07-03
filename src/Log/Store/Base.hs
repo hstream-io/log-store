@@ -1,16 +1,12 @@
-{-# LANGUAGE BinaryLiterals #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Log.Store.Base
   ( -- * Exported Types
     LogName,
+    Entry,
     OpenOptions (..),
     LogHandle (..),
-    Entry,
     EntryID,
-    Env (..),
     Config (..),
     Context,
 
@@ -26,59 +22,63 @@ module Log.Store.Base
     withLogStore,
 
     -- * Options
-    defaultOpenOptions
+    defaultOpenOptions,
   )
 where
 
-import Control.Exception (throw)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.UTF8 as U
 import Data.Default (def)
 import Data.Function ((&))
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef)
 import Data.Maybe (isJust)
-import Data.Store (Store, decode, encode)
 import Data.Vector (Vector, forM)
-import Data.Word
 import qualified Database.RocksDB as R
-import GHC.Generics (Generic)
+import Log.Store.Internal
+import Log.Store.Utils
 import Streamly (Serial)
 import qualified Streamly.Prelude as S
 
--- | Log name
-type LogName = String
+-- | Config info
+newtype Config = Config {rootDbPath :: FilePath}
 
--- | Log Id
-type LogID = Word64
-
--- | LogHandle
-data LogHandle = LogHandle
-  { logName :: LogName,
-    logID :: LogID,
-    openOptions :: OpenOptions,
-    maxEntryIdRef :: IORef EntryID
+data Context = Context
+  { dbHandle :: R.DB,
+    defaultCFHandle :: R.ColumnFamily,
+    metaCFHandle :: R.ColumnFamily,
+    dataCFHandle :: R.ColumnFamily
   }
 
--- | entry which will be appended to a log
-type Entry = B.ByteString
-
--- | entry Id
-type EntryID = Word64
-
--- | entry content with some meta info
--- |
-data InnerEntry = InnerEntry EntryID Entry
-  deriving (Generic, Eq, Show)
-
-instance Store InnerEntry
-
-data EntryKey = EntryKey LogID EntryID
-  deriving (Generic, Eq, Show)
-
-instance Store EntryKey
+-- | init Context using Config
+initialize :: MonadIO m => Config -> m Context
+initialize Config {..} =
+  liftIO $ do
+    (db, [defaultCF, metaCF, dataCF]) <-
+      R.openColumnFamilies
+        R.defaultDBOptions
+          { R.createIfMissing = True,
+            R.createMissingColumnFamilies = True
+          }
+        rootDbPath
+        [ R.ColumnFamilyDescriptor {name = defaultCFName, options = R.defaultDBOptions},
+          R.ColumnFamilyDescriptor {name = metaCFName, options = R.defaultDBOptions},
+          R.ColumnFamilyDescriptor {name = dataCFName, options = R.defaultDBOptions}
+        ]
+    return
+      Context
+        { dbHandle = db,
+          defaultCFHandle = defaultCF,
+          metaCFHandle = metaCF,
+          dataCFHandle = dataCF
+        }
+  where
+    dataCFName = "data"
+    metaCFName = "meta"
+    defaultCFName = "default"
 
 -- | open options
 data OpenOptions = OpenOptions
@@ -94,82 +94,16 @@ defaultOpenOptions =
       createIfMissing = False
     }
 
--- | Config info
-newtype Config = Config {rootDbPath :: FilePath}
+type LogName = String
 
-dataCFName :: String
-dataCFName = "data"
+type Entry = B.ByteString
 
-metaCFName :: String
-metaCFName = "meta"
-
--- | init
---
--- | 1. get config
--- | 2. create db path if necessary
--- | 3. return db and cf handles
--- |
-initialize :: MonadIO m => Env -> m Context
-initialize env =
-  liftIO $ do
-    (db, [defaultCF, metaCF, dataCF]) <-
-      R.openColumnFamilies
-        R.defaultDBOptions
-          { R.createIfMissing = True,
-            R.createMissingColumnFamilies = True
-          }
-        rootPath
-        [ R.ColumnFamilyDescriptor {name = "default", options = R.defaultDBOptions},
-          R.ColumnFamilyDescriptor {name = metaCFName, options = R.defaultDBOptions},
-          R.ColumnFamilyDescriptor {name = dataCFName, options = R.defaultDBOptions}
-        ]
-    return Context {dbHandle = db, defaultCFHandle = defaultCF, metaCFHandle = metaCF, dataCFHandle = dataCF}
-  where
-    rootPath =
-      case env of
-        DefaultEnv -> rootDbPath defaultConfig
-        UserDefinedEnv cfg -> rootDbPath cfg
-
-data Env
-  = DefaultEnv
-  | UserDefinedEnv Config
-
--- | init Config from config file
-defaultConfig :: Config
-defaultConfig =
-  Config
-    { rootDbPath = "/usr/local/hstream/log-store"
-    }
-
--- | it is used to generate a new logId while
--- | creating a new log.
--- |
--- | todo:
--- | exception need to consider
-generateLogId :: MonadIO m => R.DB -> R.ColumnFamily -> m LogID
-generateLogId db cf =
-  do
-    oldId <- R.getCF db def cf maxLogIdKey
-    case oldId of
-      Nothing -> do
-        R.putCF db def cf maxLogIdKey (encode (1 :: Word64))
-        return 1
-      Just oid -> updateLogId oid
-  where
-    maxLogIdKey = "maxLogId"
-    updateLogId oldId =
-      do
-        R.putCF db def cf maxLogIdKey (encode newLogId)
-        return newLogId
-      where
-        newLogId :: Word64
-        newLogId = deserialize oldId + 1
-
-data Context = Context
-  { dbHandle :: R.DB,
-    defaultCFHandle :: R.ColumnFamily,
-    metaCFHandle :: R.ColumnFamily,
-    dataCFHandle :: R.ColumnFamily
+-- | LogHandle
+data LogHandle = LogHandle
+  { logName :: LogName,
+    logID :: LogID,
+    openOptions :: OpenOptions,
+    maxEntryIdRef :: IORef EntryID
   }
 
 -- | open a log, will return a LogHandle for later operation
@@ -177,13 +111,13 @@ data Context = Context
 open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
 open name op@OpenOptions {..} = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (encode name)
+  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
   case logId of
     Nothing ->
       if createIfMissing
         then do
           id <- create name
-          maxEntryIdRef <- liftIO $ newIORef (0 :: EntryID)
+          maxEntryIdRef <- liftIO $ newIORef minEntryId
           return $
             LogHandle
               { logName = name,
@@ -210,7 +144,7 @@ getMaxEntryId logId = do
   R.withIteratorCF dbHandle def dataCFHandle findMaxEntryId
   where
     findMaxEntryId iterator = do
-      R.seekForPrev iterator (encode $ EntryKey logId 0xffffffffffffffff)
+      R.seekForPrev iterator (serialize $ EntryKey logId maxEntryId)
       isValid <- R.valid iterator
       if isValid
         then do
@@ -223,13 +157,13 @@ getMaxEntryId logId = do
             Nothing -> ioError $ userError "getMaxEntryId occurs error"
             Just str -> ioError $ userError $ "getMaxEntryId error: " ++ str
 
-exists :: MonadIO m => LogName -> ReaderT Context m Bool
+exists :: MonadIO m => String -> ReaderT Context m Bool
 exists name = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (encode name)
+  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
   return $ isJust logId
 
-create :: MonadIO m => LogName -> ReaderT Context m LogID
+create :: MonadIO m => String -> ReaderT Context m LogID
 create name = do
   flag <- exists name
   if flag
@@ -240,12 +174,14 @@ create name = do
   where
     initLog db metaCf dataCf batch = do
       logId <- generateLogId db metaCf
-      R.batchPutCF batch metaCf (encode name) (encode logId)
-      R.batchPutCF batch dataCf (encode $ EntryKey logId startEntryId) (encode startEntryValue)
+      R.batchPutCF batch metaCf (serialize name) (serialize logId)
+      R.batchPutCF
+        batch
+        dataCf
+        (serialize $ EntryKey logId minEntryId)
+        (serialize $ InnerEntry minEntryId $ U.fromString "first entry")
       R.write db def batch
       return logId
-    startEntryId = 0 :: Word64
-    startEntryValue = 0 :: Word64
 
 -- | append an entry to log
 appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m EntryID
@@ -254,8 +190,8 @@ appendEntry LogHandle {..} entry = do
   if writeMode openOptions
     then do
       entryId <- generateEntryId maxEntryIdRef
-      let valueBstr = encode $ InnerEntry entryId entry
-      R.putCF dbHandle def dataCFHandle (encode $ EntryKey logID entryId) valueBstr
+      let valueBstr = serialize $ InnerEntry entryId entry
+      R.putCF dbHandle def dataCFHandle (serialize $ EntryKey logID entryId) valueBstr
       return entryId
     else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
 
@@ -274,18 +210,8 @@ appendEntries LogHandle {..} entries = do
       where
         batchAdd entry = do
           entryId <- generateEntryId maxEntryIdRef
-          R.batchPutCF batch cf (encode $ EntryKey logID entryId) (encode $ InnerEntry entryId entry)
+          R.batchPutCF batch cf (serialize $ EntryKey logID entryId) (serialize $ InnerEntry entryId entry)
           return entryId
-
--- | generate entry Id
--- |
-generateEntryId :: MonadIO m => IORef EntryID -> m EntryID
-generateEntryId entryIdRef = liftIO $
-  do
-    oldId <- readIORef entryIdRef
-    let newId = oldId + 1
-    writeIORef entryIdRef newId
-    return newId
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
 -- |
@@ -299,18 +225,20 @@ readEntries ::
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
   let kvStream = R.rangeCF dbHandle def dataCFHandle first last
-  return $ kvStream & S.map snd & S.map (deserialize :: B.ByteString -> InnerEntry) & S.map (\(InnerEntry entryId entry) -> (entry, entryId))
+  return $
+    kvStream
+      & S.map snd
+      & S.map (deserialize :: Entry -> InnerEntry)
+      & S.map (\(InnerEntry entryId entry) -> (entry, entryId))
   where
     first =
       case firstKey of
-        Nothing -> Just $ encode $ EntryKey logID minEntryId
-        Just k -> Just $ encode $ EntryKey logID k
+        Nothing -> Just $ serialize $ EntryKey logID firstNormalEntryId
+        Just k -> Just $ serialize $ EntryKey logID k
     last =
       case lastKey of
-        Nothing -> Just $ encode $ EntryKey logID maxEntryId
-        Just k -> Just $ encode $ EntryKey logID k
-    minEntryId = 1 :: Word64
-    maxEntryId = 0xffffffffffffffff :: Word64
+        Nothing -> Just $ serialize $ EntryKey logID maxEntryId
+        Just k -> Just $ serialize $ EntryKey logID k
 
 -- | close log
 -- |
@@ -339,13 +267,7 @@ withLogStore cfg r =
     ( do
         (_, ctx) <-
           allocate
-            (initialize $ UserDefinedEnv cfg)
+            (initialize cfg)
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )
-
-deserialize :: Store a => B.ByteString -> a
-deserialize bytes =
-  case decode bytes of
-    Left e -> throw e
-    Right v -> v

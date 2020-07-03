@@ -13,7 +13,6 @@ import qualified Data.Vector as V
 import Log.Store.Base
   ( Config (..),
     Context,
-    Env (..),
     LogHandle (..),
     appendEntries,
     appendEntry,
@@ -222,7 +221,7 @@ withLogStoreTest r =
           createTempDirectory Nothing "log-store-test"
         (_, ctx) <-
           allocate
-            (initialize $ UserDefinedEnv Config {rootDbPath = path})
+            (initialize $ Config {rootDbPath = path})
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )

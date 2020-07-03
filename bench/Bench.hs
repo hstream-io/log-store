@@ -128,7 +128,7 @@ withLogStoreBench r =
           createTempDirectory Nothing "log-store-bench"
         (_, ctx) <-
           allocate
-            (initialize $ UserDefinedEnv Config {rootDbPath = path})
+            (initialize $ Config {rootDbPath = path})
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )

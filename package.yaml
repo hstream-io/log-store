@@ -32,6 +32,7 @@ dependencies:
 - rocksdb-haskell-bindings
 - streamly
 - vector
+- utf8-string
 
 library:
   source-dirs: src
@@ -54,7 +55,6 @@ tests:
     - hspec-expectations
     - QuickCheck
     - temporary-resourcet
-    - utf8-string
 
 benchmarks:
   log-store-benchmark:
