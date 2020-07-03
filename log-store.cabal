@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: d751eed02b39256ff342bbc085b2fba85e20c625a8716da0b64dc0d4152097ba
+-- hash: 07799ae13781cbf4f7a627c749bc4b42979c55b7e21fb9ea075dd234129a984c
 
 name:           log-store
 version:        0.1.0.0
@@ -29,6 +29,7 @@ library
   exposed-modules:
       Log.Store.Base
   other-modules:
+      Log.Store.Exception
       Log.Store.Internal
       Log.Store.Utils
       Paths_log_store

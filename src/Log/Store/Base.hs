@@ -26,6 +26,7 @@ module Log.Store.Base
   )
 where
 
+import Control.Exception (throwIO)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
@@ -38,6 +39,7 @@ import Data.IORef (IORef, newIORef)
 import Data.Maybe (isJust)
 import Data.Vector (Vector, forM)
 import qualified Database.RocksDB as R
+import Log.Store.Exception
 import Log.Store.Internal
 import Log.Store.Utils
 import Streamly (Serial)
@@ -125,7 +127,10 @@ open name op@OpenOptions {..} = do
                 openOptions = op,
                 maxEntryIdRef = maxEntryIdRef
               }
-        else liftIO $ ioError $ userError $ "no log named " ++ name ++ " found"
+        else
+          liftIO $
+            throwIO $
+              LogStoreLogNotFoundException $ "no log named " ++ name ++ " found"
     Just id ->
       do
         maxEntryId <- getMaxEntryId (deserialize id)
@@ -154,8 +159,8 @@ getMaxEntryId logId = do
         else do
           errStr <- R.getError iterator
           case errStr of
-            Nothing -> ioError $ userError "getMaxEntryId occurs error"
-            Just str -> ioError $ userError $ "getMaxEntryId error: " ++ str
+            Nothing -> throwIO $ LogStoreIOException "getMaxEntryId occurs error"
+            Just str -> throwIO $ LogStoreIOException $ "getMaxEntryId error: " ++ str
 
 exists :: MonadIO m => String -> ReaderT Context m Bool
 exists name = do
@@ -167,7 +172,10 @@ create :: MonadIO m => String -> ReaderT Context m LogID
 create name = do
   flag <- exists name
   if flag
-    then liftIO $ ioError $ userError $ "log " ++ name ++ " already existed"
+    then
+      liftIO $
+        throwIO $
+          LogStoreLogAlreadyExistsException $ "log " ++ name ++ " already existed"
     else do
       Context {..} <- ask
       R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle
@@ -193,7 +201,10 @@ appendEntry LogHandle {..} entry = do
       let valueBstr = serialize $ InnerEntry entryId entry
       R.putCF dbHandle def dataCFHandle (serialize $ EntryKey logID entryId) valueBstr
       return entryId
-    else liftIO $ ioError $ userError $ "log named " ++ logName ++ " is not writable."
+    else
+      liftIO $
+        throwIO $
+          LogStoreUnsupportedOperationException $ "log named " ++ logName ++ " is not writable."
 
 appendEntries :: MonadIO m => LogHandle -> Vector Entry -> ReaderT Context m (Vector EntryID)
 appendEntries LogHandle {..} entries = do
@@ -214,8 +225,6 @@ appendEntries LogHandle {..} entries = do
           return entryId
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
--- |
--- |
 readEntries ::
   MonadIO m =>
   LogHandle ->
@@ -249,8 +258,7 @@ readEntries LogHandle {..} firstKey lastKey = do
 close :: MonadIO m => LogHandle -> ReaderT Context m ()
 close LogHandle {..} = return ()
 
--- | free init resource
--- |
+-- | shutDown and free resources
 shutDown :: MonadIO m => ReaderT Context m ()
 shutDown = do
   Context {..} <- ask
@@ -260,7 +268,6 @@ shutDown = do
   R.close dbHandle
 
 -- | function that wrap initialize and resource release.
--- |
 withLogStore :: MonadUnliftIO m => Config -> ReaderT Context m a -> m a
 withLogStore cfg r =
   runResourceT
