@@ -8,6 +8,7 @@ data LogStoreException
   | LogStoreLogNotFoundException String
   | LogStoreLogAlreadyExistsException String
   | LogStoreUnsupportedOperationException String
+  | LogStoreDecodeException String
   | LogStoreUnknownException String
   deriving (Show, Typeable)
 

@@ -9,6 +9,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as U
+import Data.Function ((&))
 import qualified Data.Vector as V
 import Log.Store.Base
   ( Config (..),
@@ -186,16 +187,39 @@ main = hspec $
               liftIO $ S.toList s
           )
           `shouldReturn` [("entry", 1), ("entry", 2), ("entry", 3)]
-      it "append entry repeatly to a log" $
+      it "append entry repeatly to a log and read them" $
         withLogStoreTest
           ( do
               logHandle <-
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              appendEntryRepeat 4097 logHandle
+              appendEntryRepeat 300 logHandle
+              s <- readEntries logHandle Nothing Nothing
+              liftIO $ s & S.map snd & S.toList
           )
-          `shouldReturn` 4097
+          `shouldReturn` [1 .. 300]
+      it "multiple open, append and read" $
+        withLogStoreTest
+          ( do
+              lh1 <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              appendEntryRepeat 300 lh1
+              lh2 <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True}
+              appendEntryRepeat 300 lh2
+              lh3 <-
+                open
+                  "log"
+                  defaultOpenOptions
+              s <- readEntries lh3 Nothing Nothing
+              liftIO $ s & S.map snd & S.toList
+          )
+          `shouldReturn` [1 .. 600]
 
 -- | append n entries to a log
 appendEntryRepeat n lh = append' 1

@@ -37,6 +37,7 @@ import Data.Default (def)
 import Data.Function ((&))
 import Data.IORef (IORef, newIORef)
 import Data.Maybe (isJust)
+import qualified Data.Text as T
 import Data.Vector (Vector, forM)
 import qualified Database.RocksDB as R
 import Log.Store.Exception
@@ -96,8 +97,6 @@ defaultOpenOptions =
       createIfMissing = False
     }
 
-type LogName = String
-
 type Entry = B.ByteString
 
 -- | LogHandle
@@ -113,7 +112,7 @@ data LogHandle = LogHandle
 open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
 open name op@OpenOptions {..} = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
+  logId <- R.getCF dbHandle def metaCFHandle (encodeText name)
   case logId of
     Nothing ->
       if createIfMissing
@@ -130,15 +129,16 @@ open name op@OpenOptions {..} = do
         else
           liftIO $
             throwIO $
-              LogStoreLogNotFoundException $ "no log named " ++ name ++ " found"
+              LogStoreLogNotFoundException $ "no log named " ++ T.unpack name ++ " found"
     Just id ->
       do
-        maxEntryId <- getMaxEntryId (deserialize id)
+        let logId = decodeLogId id
+        maxEntryId <- getMaxEntryId logId
         maxEntryIdRef <- liftIO $ newIORef maxEntryId
         return $
           LogHandle
             { logName = name,
-              logID = deserialize id,
+              logID = logId,
               openOptions = op,
               maxEntryIdRef = maxEntryIdRef
             }
@@ -149,12 +149,12 @@ getMaxEntryId logId = do
   R.withIteratorCF dbHandle def dataCFHandle findMaxEntryId
   where
     findMaxEntryId iterator = do
-      R.seekForPrev iterator (serialize $ EntryKey logId maxEntryId)
+      R.seekForPrev iterator (encodeEntryKey $ EntryKey logId maxEntryId)
       isValid <- R.valid iterator
       if isValid
         then do
           entryKey <- R.key iterator
-          let (EntryKey _ entryId) = deserialize entryKey
+          let (EntryKey _ entryId) = decodeEntryKey entryKey
           return entryId
         else do
           errStr <- R.getError iterator
@@ -162,32 +162,32 @@ getMaxEntryId logId = do
             Nothing -> throwIO $ LogStoreIOException "getMaxEntryId occurs error"
             Just str -> throwIO $ LogStoreIOException $ "getMaxEntryId error: " ++ str
 
-exists :: MonadIO m => String -> ReaderT Context m Bool
+exists :: MonadIO m => LogName -> ReaderT Context m Bool
 exists name = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (serialize name)
+  logId <- R.getCF dbHandle def metaCFHandle (encodeLogName name)
   return $ isJust logId
 
-create :: MonadIO m => String -> ReaderT Context m LogID
+create :: MonadIO m => LogName -> ReaderT Context m LogID
 create name = do
   flag <- exists name
   if flag
     then
       liftIO $
         throwIO $
-          LogStoreLogAlreadyExistsException $ "log " ++ name ++ " already existed"
+          LogStoreLogAlreadyExistsException $ "log " ++ T.unpack name ++ " already existed"
     else do
       Context {..} <- ask
       R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle
   where
     initLog db metaCf dataCf batch = do
       logId <- generateLogId db metaCf
-      R.batchPutCF batch metaCf (serialize name) (serialize logId)
+      R.batchPutCF batch metaCf (encodeLogName name) (encodeLogId logId)
       R.batchPutCF
         batch
         dataCf
-        (serialize $ EntryKey logId minEntryId)
-        (serialize $ InnerEntry minEntryId $ U.fromString "first entry")
+        (encodeEntryKey $ EntryKey logId minEntryId)
+        (encodeInnerEntry $ InnerEntry minEntryId $ U.fromString "first entry")
       R.write db def batch
       return logId
 
@@ -198,13 +198,13 @@ appendEntry LogHandle {..} entry = do
   if writeMode openOptions
     then do
       entryId <- generateEntryId maxEntryIdRef
-      let valueBstr = serialize $ InnerEntry entryId entry
-      R.putCF dbHandle def dataCFHandle (serialize $ EntryKey logID entryId) valueBstr
+      let valueBstr = encodeInnerEntry $ InnerEntry entryId entry
+      R.putCF dbHandle def dataCFHandle (encodeEntryKey $ EntryKey logID entryId) valueBstr
       return entryId
     else
       liftIO $
         throwIO $
-          LogStoreUnsupportedOperationException $ "log named " ++ logName ++ " is not writable."
+          LogStoreUnsupportedOperationException $ "log named " ++ T.unpack logName ++ " is not writable."
 
 appendEntries :: MonadIO m => LogHandle -> Vector Entry -> ReaderT Context m (Vector EntryID)
 appendEntries LogHandle {..} entries = do
@@ -221,7 +221,7 @@ appendEntries LogHandle {..} entries = do
       where
         batchAdd entry = do
           entryId <- generateEntryId maxEntryIdRef
-          R.batchPutCF batch cf (serialize $ EntryKey logID entryId) (serialize $ InnerEntry entryId entry)
+          R.batchPutCF batch cf (encodeEntryKey $ EntryKey logID entryId) (encodeInnerEntry $ InnerEntry entryId entry)
           return entryId
 
 -- | read entries whose entryId in [firstEntry, LastEntry]
@@ -237,17 +237,17 @@ readEntries LogHandle {..} firstKey lastKey = do
   return $
     kvStream
       & S.map snd
-      & S.map (deserialize :: Entry -> InnerEntry)
+      & S.map decodeInnerEntry
       & S.map (\(InnerEntry entryId entry) -> (entry, entryId))
   where
     first =
       case firstKey of
-        Nothing -> Just $ serialize $ EntryKey logID firstNormalEntryId
-        Just k -> Just $ serialize $ EntryKey logID k
+        Nothing -> Just $ encodeEntryKey $ EntryKey logID firstNormalEntryId
+        Just k -> Just $ encodeEntryKey $ EntryKey logID k
     last =
       case lastKey of
-        Nothing -> Just $ serialize $ EntryKey logID maxEntryId
-        Just k -> Just $ serialize $ EntryKey logID k
+        Nothing -> Just $ encodeEntryKey $ EntryKey logID maxEntryId
+        Just k -> Just $ encodeEntryKey $ EntryKey logID k
 
 -- | close log
 -- |
