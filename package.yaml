@@ -23,7 +23,8 @@ dependencies:
 - base >= 4.7 && < 5
 - bytestring
 - data-default
-- store
+- bytestring-strict-builder
+- binary-strict
 - resourcet
 - filepath
 - directory
@@ -33,6 +34,7 @@ dependencies:
 - streamly
 - vector
 - utf8-string
+- text
 
 library:
   source-dirs: src

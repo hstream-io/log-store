@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 07799ae13781cbf4f7a627c749bc4b42979c55b7e21fb9ea075dd234129a984c
+-- hash: e1aab789e50c7006cd080fd3c7e16dccd476b2ef1a32cbe8465d4c4455d642c3
 
 name:           log-store
 version:        0.1.0.0
@@ -38,15 +38,17 @@ library
   ghc-options: -W
   build-depends:
       base >=4.7 && <5
+    , binary-strict
     , bytestring
+    , bytestring-strict-builder
     , data-default
     , directory
     , filepath
     , mtl
     , resourcet
     , rocksdb-haskell-bindings
-    , store
     , streamly
+    , text
     , transformers
     , utf8-string
     , vector
@@ -63,7 +65,9 @@ test-suite log-store-test
   build-depends:
       QuickCheck
     , base >=4.7 && <5
+    , binary-strict
     , bytestring
+    , bytestring-strict-builder
     , data-default
     , directory
     , filepath
@@ -73,9 +77,9 @@ test-suite log-store-test
     , mtl
     , resourcet
     , rocksdb-haskell-bindings
-    , store
     , streamly
     , temporary-resourcet
+    , text
     , transformers
     , utf8-string
     , vector
@@ -91,7 +95,9 @@ benchmark log-store-benchmark
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -fprof-auto
   build-depends:
       base >=4.7 && <5
+    , binary-strict
     , bytestring
+    , bytestring-strict-builder
     , criterion
     , data-default
     , directory
@@ -100,9 +106,9 @@ benchmark log-store-benchmark
     , mtl
     , resourcet
     , rocksdb-haskell-bindings
-    , store
     , streamly
     , temporary-resourcet
+    , text
     , transformers
     , utf8-string
     , vector
