@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
