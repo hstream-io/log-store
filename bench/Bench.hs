@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Strict #-}
 
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
@@ -9,6 +9,7 @@ import Criterion.Main
 import qualified Data.ByteString as B
 import qualified Data.Vector as V
 import Log.Store.Base
+import Streamly.Prelude as S
 import System.IO.Temp (createTempDirectory)
 
 main =
@@ -41,13 +42,25 @@ main =
         "append-batch"
         [ bench "2^5 2^7 2^13" $
             nfIO $
-              writeNBytesEntriesBatch (2 ^ 4) (2 ^ 7) (2 ^ 13),
+              writeNBytesEntriesBatch (2 ^ 5) (2 ^ 7) (2 ^ 13),
           bench "2^6 2^7 2^13" $
             nfIO $
               writeNBytesEntriesBatch (2 ^ 6) (2 ^ 7) (2 ^ 13),
           bench "2^7 2^7 2^13" $
             nfIO $
               writeNBytesEntriesBatch (2 ^ 7) (2 ^ 7) (2 ^ 13)
+        ],
+      bgroup
+        "read"
+        [ bench "2^5 2^7 2^13" $
+            nfIO $
+              writeAndRead (2 ^ 5) (2 ^ 7) (2 ^ 13),
+          bench "2^6 2^7 2^13" $
+            nfIO $
+              writeAndRead (2 ^ 6) (2 ^ 7) (2 ^ 13),
+          bench "2^7 2^7 2^13" $
+            nfIO $
+              writeAndRead (2 ^ 7) (2 ^ 7) (2 ^ 13)
         ]
     ]
 
@@ -79,6 +92,25 @@ writeNBytesEntriesBatch entrySize batchSize batchNum =
         "log"
         defaultOpenOptions {writeMode = True, createIfMissing = True}
     write' lh 1
+  where
+    write' lh x =
+      if x == batchNum
+        then appendEntries lh $ V.replicate batchSize entry
+        else do
+          appendEntries lh $ V.replicate batchSize entry
+          write' lh (x + 1)
+    entry = nBytesEntry entrySize
+
+writeAndRead :: MonadUnliftIO m => Int -> Int -> Int -> m ()
+writeAndRead entrySize batchSize batchNum =
+  withLogStoreBench $ do
+    lh <-
+      open
+        "log"
+        defaultOpenOptions {writeMode = True, createIfMissing = True}
+    write' lh 1
+    s <- readEntries lh Nothing Nothing
+    liftIO $ S.drain s
   where
     write' lh x =
       if x == batchNum
