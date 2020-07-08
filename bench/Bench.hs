@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE Strict #-}
 
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans (lift)
@@ -6,121 +7,86 @@ import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import Criterion.Main
 import qualified Data.ByteString as B
+import qualified Data.Vector as V
 import Log.Store.Base
 import System.IO.Temp (createTempDirectory)
 
 main =
   defaultMain
     [ bgroup
-        "append"
+        "append-single"
         [ bench "2^4 2^20" $
-            nfIO
-              ( withLogStoreBench $ do
-                  lh <-
-                    open
-                      "log"
-                      defaultOpenOptions {writeMode = True, createIfMissing = True}
-                  append16BytesEntries lh $ 2 ^ 20
-              ),
+            nfIO $
+              writeNBytesEntries (2 ^ 4) (2 ^ 20),
           bench "2^5 2^20" $
-            nfIO
-              ( withLogStoreBench $ do
-                  lh <-
-                    open
-                      "log"
-                      defaultOpenOptions {writeMode = True, createIfMissing = True}
-                  append32BytesEntries lh $ 2 ^ 20
-              ),
+            nfIO $
+              writeNBytesEntries (2 ^ 5) (2 ^ 20),
           bench "2^6 2^20" $
-            nfIO
-              ( withLogStoreBench $ do
-                  lh <-
-                    open
-                      "log"
-                      defaultOpenOptions {writeMode = True, createIfMissing = True}
-                  append64BytesEntries lh $ 2 ^ 20
-              ),
+            nfIO $
+              writeNBytesEntries (2 ^ 6) (2 ^ 20),
+          bench "2^7 2^20" $
+            nfIO $
+              writeNBytesEntries (2 ^ 7) (2 ^ 20),
           bench "2^12 2^13" $
-            nfIO
-              ( withLogStoreBench $ do
-                  lh <-
-                    open
-                      "log"
-                      defaultOpenOptions {writeMode = True, createIfMissing = True}
-                  append4096BytesEntries lh $ 2 ^ 13
-              ),
+            nfIO $
+              writeNBytesEntries (2 ^ 12) (2 ^ 13),
           bench "2^12 2^14" $
-            nfIO
-              ( withLogStoreBench $ do
-                  lh <-
-                    open
-                      "log"
-                      defaultOpenOptions {writeMode = True, createIfMissing = True}
-                  append4096BytesEntries lh $ 2 ^ 14
-              ),
+            nfIO $
+              writeNBytesEntries (2 ^ 12) (2 ^ 14),
           bench "2^12 2^20" $
-            nfIO
-              ( withLogStoreBench $ do
-                  lh <-
-                    open
-                      "log"
-                      defaultOpenOptions {writeMode = True, createIfMissing = True}
-                  append4096BytesEntries lh $ 2 ^ 20
-              )
+            nfIO $
+              writeNBytesEntries (2 ^ 12) (2 ^ 20)
+        ],
+      bgroup
+        "append-batch"
+        [ bench "2^5 2^7 2^13" $
+            nfIO $
+              writeNBytesEntriesBatch (2 ^ 4) (2 ^ 7) (2 ^ 13),
+          bench "2^6 2^7 2^13" $
+            nfIO $
+              writeNBytesEntriesBatch (2 ^ 6) (2 ^ 7) (2 ^ 13),
+          bench "2^7 2^7 2^13" $
+            nfIO $
+              writeNBytesEntriesBatch (2 ^ 7) (2 ^ 7) (2 ^ 13)
         ]
     ]
 
-append16BytesEntries :: MonadIO m => LogHandle -> Int -> ReaderT Context m EntryID
-append16BytesEntries lh num = append16' 1
+nBytesEntry :: Int -> B.ByteString
+nBytesEntry n = B.replicate n 0xff
+
+writeNBytesEntries :: MonadUnliftIO m => Int -> Int -> m EntryID
+writeNBytesEntries entrySize entryNum =
+  withLogStoreBench $ do
+    lh <-
+      open
+        "log"
+        defaultOpenOptions {writeMode = True, createIfMissing = True}
+    write' lh 1
   where
-    append16' x =
-      if x == num
-        then appendEntry lh entry16Bytes
+    write' lh x =
+      if x == entryNum
+        then appendEntry lh entry
         else do
-          appendEntry lh entry16Bytes
-          append16' (x + 1)
+          appendEntry lh entry
+          write' lh (x + 1)
+    entry = nBytesEntry entrySize
 
-append32BytesEntries :: MonadIO m => LogHandle -> Int -> ReaderT Context m EntryID
-append32BytesEntries lh num = append32' 1
+writeNBytesEntriesBatch :: MonadUnliftIO m => Int -> Int -> Int -> m (V.Vector EntryID)
+writeNBytesEntriesBatch entrySize batchSize batchNum =
+  withLogStoreBench $ do
+    lh <-
+      open
+        "log"
+        defaultOpenOptions {writeMode = True, createIfMissing = True}
+    write' lh 1
   where
-    append32' x =
-      if x == num
-        then appendEntry lh entry32Bytes
+    write' lh x =
+      if x == batchNum
+        then appendEntries lh $ V.replicate batchSize entry
         else do
-          appendEntry lh entry32Bytes
-          append32' (x + 1)
-
-append64BytesEntries :: MonadIO m => LogHandle -> Int -> ReaderT Context m EntryID
-append64BytesEntries lh num = append64' 1
-  where
-    append64' x =
-      if x == num
-        then appendEntry lh entry64Bytes
-        else do
-          appendEntry lh entry64Bytes
-          append64' (x + 1)
-
-append4096BytesEntries :: MonadIO m => LogHandle -> Int -> ReaderT Context m EntryID
-append4096BytesEntries lh num = append4096' 1
-  where
-    append4096' x =
-      if x == num
-        then appendEntry lh entry4096Bytes
-        else do
-          appendEntry lh entry4096Bytes
-          append4096' (x + 1)
-
-entry16Bytes :: B.ByteString
-entry16Bytes = B.replicate 2 0xff
-
-entry32Bytes :: B.ByteString
-entry32Bytes = B.replicate 4 0xff
-
-entry64Bytes :: B.ByteString
-entry64Bytes = B.replicate 8 0xff
-
-entry4096Bytes :: B.ByteString
-entry4096Bytes = B.replicate 512 0xff
+          appendEntries lh $ V.replicate batchSize entry
+          write' lh (x + 1)
+    entry = nBytesEntry entrySize
 
 withLogStoreBench :: MonadUnliftIO m => ReaderT Context m a -> m a
 withLogStoreBench r =
