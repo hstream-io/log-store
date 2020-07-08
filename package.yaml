@@ -71,4 +71,3 @@ benchmarks:
       - log-store
       - criterion
       - temporary-resourcet
-
