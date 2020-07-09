@@ -4,3 +4,4 @@
 *.iml
 stack.yaml.lock
 *.prof
+db-temp/

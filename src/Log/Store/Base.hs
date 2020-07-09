@@ -67,9 +67,22 @@ initialize Config {..} =
             R.createMissingColumnFamilies = True
           }
         rootDbPath
-        [ R.ColumnFamilyDescriptor {name = defaultCFName, options = R.defaultDBOptions},
-          R.ColumnFamilyDescriptor {name = metaCFName, options = R.defaultDBOptions},
-          R.ColumnFamilyDescriptor {name = dataCFName, options = R.defaultDBOptions}
+        [ R.ColumnFamilyDescriptor
+            { name = defaultCFName,
+              options = R.defaultDBOptions
+            },
+          R.ColumnFamilyDescriptor
+            { name = metaCFName,
+              options = R.defaultDBOptions
+            },
+          R.ColumnFamilyDescriptor
+            { name = dataCFName,
+              options =
+                R.defaultDBOptions
+                  { R.writeBufferSize = 64 * 1024 * 1024,
+                    R.disableAutoCompactions = True
+                  }
+            }
         ]
     return
       Context
@@ -199,7 +212,12 @@ appendEntry LogHandle {..} entry = do
     then do
       entryId <- generateEntryId maxEntryIdRef
       let valueBstr = encodeInnerEntry $ InnerEntry entryId entry
-      R.putCF dbHandle def dataCFHandle (encodeEntryKey $ EntryKey logID entryId) valueBstr
+      R.putCF
+        dbHandle
+        R.defaultWriteOptions {R.disableWAL = True}
+        dataCFHandle
+        (encodeEntryKey $ EntryKey logID entryId)
+        valueBstr
       return entryId
     else
       liftIO $
