@@ -3,7 +3,7 @@
 # variables here.  See https://github.com/composewell/packcheck for all
 # options and their explanation.
 
-#dist: bionic
+dist: bionic
 env:
   # ------------------------------------------------------------------------
   # Global options, you can use these per build as well
@@ -22,9 +22,9 @@ env:
     # - DISABLE_TEST=y
     # - DISABLE_BENCH=y
     - DISABLE_DOCS=y
-    # - DISABLE_SDIST_BUILD=y
-    # - DISABLE_SDIST_GIT_CHECK=y
-    # - DISABLE_DIST_CHECKS=y
+    - DISABLE_SDIST_BUILD=y
+    - DISABLE_SDIST_GIT_CHECK=y
+    - DISABLE_DIST_CHECKS=y
 
     # ------------------------------------------------------------------------
     # stack options
@@ -139,8 +139,8 @@ matrix:
     - env: BUILD=stack RESOLVER=lts-14 GHCVER=8.6
       addons: {apt: {packages: [cabal-install-3.2,librocksdb-dev], sources: [hvr-ghc]}}
 
-    - env: BUILD=stack RESOLVER=lts-12 GHCVER=8.4
-      addons: {apt: {packages: [cabal-install-3.2,librocksdb-dev], sources: [hvr-ghc]}}
+    #- env: BUILD=stack RESOLVER=lts-12 GHCVER=8.4
+    #  addons: {apt: {packages: [cabal-install-3.2,librocksdb-dev], sources: [hvr-ghc]}}
 
     #- env: BUILD=stack RESOLVER=lts-6 GHCVER=7.10
     # addons: {apt: {packages: [cabal-install-3.2], sources: [hvr-ghc]}}
