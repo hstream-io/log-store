@@ -1,5 +1,5 @@
-# log-store
+# log-store [![Build Status](https://travis-ci.org/hstream-io/log-store.svg?branch=master)](https://travis-ci.org/hstream-io/log-store)
 
-log-store is a storage layer based on rocksdb for 
+
+Log-store is a storage layer based on rocksdb for 
 message/event storage.
-log-store provides log file system like API.
