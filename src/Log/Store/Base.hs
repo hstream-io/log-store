@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Log.Store.Base
@@ -35,11 +36,15 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as U
 import Data.Default (def)
 import Data.Function ((&))
+import qualified Data.HashMap.Strict as H
+import Data.Hashable (Hashable)
 import Data.IORef (IORef, newIORef)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Vector (Vector, forM)
 import qualified Database.RocksDB as R
+import GHC.Conc (STM, TVar, atomically, newTVar, newTVarIO, readTVar, writeTVar)
+import GHC.Generics (Generic)
 import Log.Store.Exception
 import Log.Store.Internal
 import Log.Store.Utils
@@ -53,7 +58,8 @@ data Context = Context
   { dbHandle :: R.DB,
     defaultCFHandle :: R.ColumnFamily,
     metaCFHandle :: R.ColumnFamily,
-    dataCFHandle :: R.ColumnFamily
+    dataCFHandle :: R.ColumnFamily,
+    logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle)
   }
 
 -- | init Context using Config
@@ -83,16 +89,18 @@ initialize Config {..} =
                     R.disableAutoCompactions = True,
                     R.level0FileNumCompactionTrigger = 2 ^ 29,
                     R.level0SlowdownWritesTrigger = 2 ^ 29,
-                    R.level0StopWritesTrigger = 2 ^ 29 
+                    R.level0StopWritesTrigger = 2 ^ 29
                   }
             }
         ]
+    cache <- newTVarIO H.empty
     return
       Context
         { dbHandle = db,
           defaultCFHandle = defaultCF,
           metaCFHandle = metaCF,
-          dataCFHandle = dataCF
+          dataCFHandle = dataCF,
+          logHandleCache = cache
         }
   where
     dataCFName = "data"
@@ -105,6 +113,9 @@ data OpenOptions = OpenOptions
     writeMode :: Bool,
     createIfMissing :: Bool
   }
+  deriving (Eq, Show, Generic)
+
+instance Hashable OpenOptions
 
 defaultOpenOptions =
   OpenOptions
@@ -122,42 +133,89 @@ data LogHandle = LogHandle
     openOptions :: OpenOptions,
     maxEntryIdRef :: IORef EntryID
   }
+  deriving (Eq)
+
+data LogHandleKey
+  = LogHandleKey LogName OpenOptions
+  deriving (Eq, Show, Generic)
+
+instance Hashable LogHandleKey
 
 -- | open a log, will return a LogHandle for later operation
 -- | (such as append and read)
 open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
-open name op@OpenOptions {..} = do
+open name opts@OpenOptions {..} = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (encodeText name)
-  case logId of
-    Nothing ->
-      if createIfMissing
-        then do
+  res <- R.getCF dbHandle def metaCFHandle (encodeText name)
+  let valid = checkOpts res
+  if valid
+    then do
+      cacheRes <- lookupCache logHandleCache
+      case cacheRes of
+        Just lh ->
+          return lh
+        Nothing -> do
+          newLh <- mkLogHandle res
+          updateCache logHandleCache newLh
+    else
+      liftIO $
+        throwIO $
+          LogStoreLogNotFoundException $
+            "no log named " ++ T.unpack name ++ " found"
+  where
+    logHandleKey = LogHandleKey name opts
+
+    lookupCache :: MonadIO m => TVar (H.HashMap LogHandleKey LogHandle) -> m (Maybe LogHandle)
+    lookupCache tc = liftIO $
+      atomically $ do
+        cache <- readTVar tc
+        case H.lookup logHandleKey cache of
+          Nothing -> return Nothing
+          Just lh -> return $ Just lh
+
+    updateCache :: MonadIO m => TVar (H.HashMap LogHandleKey LogHandle) -> LogHandle -> m LogHandle
+    updateCache tc lh = liftIO $
+      atomically $ do
+        cache <- readTVar tc
+        case H.lookup logHandleKey cache of
+          Nothing -> do
+            let newCache = H.insert logHandleKey lh cache
+            writeTVar tc newCache
+            return lh
+          Just handle -> return handle
+
+    mkLogHandle :: MonadIO m => Maybe B.ByteString -> ReaderT Context m LogHandle
+    mkLogHandle res =
+      case res of
+        Nothing -> do
           id <- create name
           maxEntryIdRef <- liftIO $ newIORef minEntryId
           return $
             LogHandle
               { logName = name,
                 logID = id,
-                openOptions = op,
+                openOptions = opts,
                 maxEntryIdRef = maxEntryIdRef
               }
-        else
-          liftIO $
-            throwIO $
-              LogStoreLogNotFoundException $ "no log named " ++ T.unpack name ++ " found"
-    Just id ->
-      do
-        let logId = decodeLogId id
-        maxEntryId <- getMaxEntryId logId
-        maxEntryIdRef <- liftIO $ newIORef maxEntryId
-        return $
-          LogHandle
-            { logName = name,
-              logID = logId,
-              openOptions = op,
-              maxEntryIdRef = maxEntryIdRef
-            }
+        Just bId ->
+          do
+            let logId = decodeLogId bId
+            maxEntryId <- getMaxEntryId logId
+            maxEntryIdRef <- liftIO $ newIORef maxEntryId
+            return $
+              LogHandle
+                { logName = name,
+                  logID = logId,
+                  openOptions = opts,
+                  maxEntryIdRef = maxEntryIdRef
+                }
+
+    checkOpts :: Maybe B.ByteString -> Bool
+    checkOpts res =
+      case res of
+        Nothing ->
+          createIfMissing
+        Just _ -> True
 
 getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m EntryID
 getMaxEntryId logId = do
