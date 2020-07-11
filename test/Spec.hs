@@ -1,8 +1,8 @@
-{-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
+import Control.Concurrent.Async.Lifted.Safe (async, wait)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Class (lift)
@@ -199,7 +199,7 @@ main = hspec $
               liftIO $ s & S.map snd & S.toList
           )
           `shouldReturn` [1 .. 300]
-      it "multiple open, append and read" $
+      it "multiple open" $
         withLogStoreTest
           ( do
               lh1 <-
@@ -220,6 +220,93 @@ main = hspec $
               liftIO $ s & S.map snd & S.toList
           )
           `shouldReturn` [1 .. 600]
+      it "sequencial open the same log should return the same logHandle" $
+        withLogStoreTest
+          ( do
+              lh1 <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              lh2 <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              lh3 <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              return $ lh1 == lh2 && lh1 == lh3
+          )
+          `shouldReturn` True
+      it "concurrent open the same log should return the same logHandle" $
+        withLogStoreTest
+          ( do
+              c1 <-
+                async
+                  ( open
+                      "log"
+                      defaultOpenOptions {writeMode = True, createIfMissing = True}
+                  )
+              c2 <-
+                async
+                  ( open
+                      "log"
+                      defaultOpenOptions {writeMode = True, createIfMissing = True}
+                  )
+              c3 <-
+                async
+                  ( open
+                      "log"
+                      defaultOpenOptions {writeMode = True, createIfMissing = True}
+                  )
+              r1 <- wait c1
+              r2 <- wait c2
+              r3 <- wait c3
+              return $ r1 == r2 && r1 == r2
+          )
+          `shouldReturn` True
+      it "concurrent open, append and read different logs" $
+        withLogStoreTest
+          ( do
+              c1 <-
+                async
+                  ( do
+                      logHandle <-
+                        open
+                          "log1"
+                          defaultOpenOptions {writeMode = True, createIfMissing = True}
+                      appendEntryRepeat 300 logHandle
+                      s <- readEntries logHandle Nothing Nothing
+                      liftIO $ s & S.map snd & S.toList
+                  )
+              c2 <-
+                async
+                  ( do
+                      logHandle <-
+                        open
+                          "log2"
+                          defaultOpenOptions {writeMode = True, createIfMissing = True}
+                      appendEntryRepeat 300 logHandle
+                      s <- readEntries logHandle Nothing Nothing
+                      liftIO $ s & S.map snd & S.toList
+                  )
+              c3 <-
+                async
+                  ( do
+                      logHandle <-
+                        open
+                          "log3"
+                          defaultOpenOptions {writeMode = True, createIfMissing = True}
+                      appendEntryRepeat 300 logHandle
+                      s <- readEntries logHandle Nothing Nothing
+                      liftIO $ s & S.map snd & S.toList
+                  )
+              r1 <- wait c1
+              r2 <- wait c2
+              r3 <- wait c3
+              return [r1, r2, r3]
+          )
+          `shouldReturn` [[1 .. 300], [1 .. 300], [1 .. 300]]
 
 -- | append n entries to a log
 appendEntryRepeat n lh = append' 1

@@ -35,6 +35,8 @@ dependencies:
 - vector
 - utf8-string
 - text
+- unordered-containers
+- hashable
 
 library:
   source-dirs: src
@@ -57,6 +59,7 @@ tests:
     - hspec-expectations
     - QuickCheck
     - temporary-resourcet
+    - lifted-async
 
 benchmarks:
   log-store-benchmark:
