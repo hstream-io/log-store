@@ -3,7 +3,7 @@
 module Main where
 
 import Control.Concurrent.Async.Lifted.Safe (async, wait)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
@@ -25,6 +25,7 @@ import Log.Store.Base
     readEntries,
     readMode,
     shutDown,
+    withLogStore,
     writeMode,
   )
 import qualified Streamly.Prelude as S
@@ -40,6 +41,13 @@ main :: IO ()
 main = hspec $
   describe "Basic Functionality" $
     do
+      --      it "append entry repeatly to a log and read them" $
+      --        withLogStore Config {rootDbPath = "db-temp"}
+      --          ( do
+      --              openAndAppendForever
+      --              return "success"
+      --          )
+      --          `shouldReturn` "success"
       it "create logs" $
         withLogStoreTest
           ( do
@@ -325,6 +333,15 @@ appendEntryRepeat n lh = append' 1
 appendForever lh = do
   appendEntries lh $ V.replicate 128 $ B.replicate 4096 0xff
   appendForever lh
+
+openAndAppendForever :: MonadIO m => ReaderT Context m ()
+openAndAppendForever = do
+  lh <-
+    open
+      "log"
+      defaultOpenOptions {writeMode = True, createIfMissing = True}
+  appendEntries lh $ V.replicate 128 $ B.replicate 4096 0xff
+  openAndAppendForever
 
 -- | help run test case
 -- | wrap create temp directory

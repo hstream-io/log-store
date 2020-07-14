@@ -43,7 +43,7 @@ import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Vector (Vector, forM)
 import qualified Database.RocksDB as R
-import GHC.Conc (STM, TVar, atomically, newTVar, newTVarIO, readTVar, writeTVar)
+import GHC.Conc (TVar, atomically, newTVarIO, readTVar, writeTVar)
 import GHC.Generics (Generic)
 import Log.Store.Exception
 import Log.Store.Internal
@@ -85,7 +85,7 @@ initialize Config {..} =
             { name = dataCFName,
               options =
                 R.defaultDBOptions
-                  { R.writeBufferSize = 64 * 1024 * 1024,
+                  { R.writeBufferSize = 1024 * 1024 * 1024,
                     R.disableAutoCompactions = True,
                     R.level0FileNumCompactionTrigger = 2 ^ 29,
                     R.level0SlowdownWritesTrigger = 2 ^ 29,
