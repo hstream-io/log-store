@@ -6,10 +6,11 @@ module Log.Store.Base
     LogName,
     Entry,
     OpenOptions (..),
-    LogHandle (..),
+    LogHandle,
     EntryID,
     Config (..),
     Context,
+    LogStoreException (..),
 
     -- * Basic functions
     initialize,
