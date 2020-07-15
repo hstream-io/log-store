@@ -249,6 +249,7 @@ main = hspec $
       it "concurrent open the same log should return the same logHandle" $
         withLogStoreTest
           ( do
+              create "log"
               c1 <-
                 async
                   ( open
