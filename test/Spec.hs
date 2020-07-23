@@ -10,6 +10,7 @@ import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as U
 import Data.Function ((&))
+import Data.List (sort)
 import qualified Data.Vector as V
 import Log.Store.Base
   ( Config (..),
@@ -316,6 +317,47 @@ main = hspec $
               return [r1, r2, r3]
           )
           `shouldReturn` [[1 .. 300], [1 .. 300], [1 .. 300]]
+      it "concurrent append to the same log" $
+        withLogStoreTest
+          ( do
+              create "log"
+              c1 <-
+                async
+                  ( do
+                      logHandle <-
+                        open
+                          "log"
+                          defaultOpenOptions {writeMode = True}
+                      appendEntryRepeat 300 logHandle
+                      return logHandle
+                  )
+              c2 <-
+                async
+                  ( do
+                      logHandle <-
+                        open
+                          "log"
+                          defaultOpenOptions {writeMode = True}
+                      appendEntryRepeat 300 logHandle
+                      return logHandle
+                  )
+              c3 <-
+                async
+                  ( do
+                      logHandle <-
+                        open
+                          "log"
+                          defaultOpenOptions {writeMode = True}
+                      appendEntryRepeat 300 logHandle
+                      return logHandle
+                  )
+              wait c1
+              wait c2
+              lh <- wait c3
+              s <- readEntries lh Nothing Nothing
+              liftIO $ s & S.map snd & S.toList
+          )
+          `shouldReturn` [1 .. 900]
 
 -- | append n entries to a log
 appendEntryRepeat n lh = append' 1

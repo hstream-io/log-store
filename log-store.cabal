@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 128036ad992e0229282d6463582a5e4d4ae0b2638d9f8e1de2dea45e76955377
+-- hash: 9760546fbfdae2619045e8b4dab885cae04d9b33c1d9f62a9d4510ed39df350c
 
 name:           log-store
 version:        0.1.0.0
@@ -37,7 +37,8 @@ library
       src
   ghc-options: -W
   build-depends:
-      base >=4.7 && <5
+      atomic-primops
+    , base >=4.7 && <5
     , binary-strict
     , bytestring
     , bytestring-strict-builder
@@ -66,6 +67,7 @@ test-suite log-store-test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       QuickCheck
+    , atomic-primops
     , base >=4.7 && <5
     , binary-strict
     , bytestring
@@ -99,7 +101,8 @@ benchmark log-store-benchmark
       bench
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -with-rtsopts=-s -fprof-auto
   build-depends:
-      base >=4.7 && <5
+      atomic-primops
+    , base >=4.7 && <5
     , binary-strict
     , bytestring
     , bytestring-strict-builder

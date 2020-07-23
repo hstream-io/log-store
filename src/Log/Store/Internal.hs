@@ -6,10 +6,11 @@ module Log.Store.Internal where
 import ByteString.StrictBuilder (builderBytes, bytes, word64BE)
 import Control.Exception (throw)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Data.Atomics (atomicModifyIORefCAS)
 import Data.Binary.Strict.Get as BinStrict
 import Data.ByteString as B
 import Data.Default (def)
-import Data.IORef (IORef, readIORef, writeIORef)
+import Data.IORef (IORef)
 import Data.Text as T
 import Data.Word (Word64)
 import qualified Database.RocksDB as R
@@ -116,9 +117,6 @@ generateLogId db cf =
 -- | generate entry Id
 -- |
 generateEntryId :: MonadIO m => IORef EntryID -> m EntryID
-generateEntryId entryIdRef = liftIO $
-  do
-    oldId <- readIORef entryIdRef
-    let newId = oldId + 1
-    writeIORef entryIdRef newId
-    return newId
+generateEntryId entryIdRef =
+  liftIO $
+    atomicModifyIORefCAS entryIdRef (\curId -> (curId + 1, curId + 1))
