@@ -53,7 +53,12 @@ import Streamly (Serial)
 import qualified Streamly.Prelude as S
 
 -- | Config info
-newtype Config = Config {rootDbPath :: FilePath}
+data Config = Config
+  { rootDbPath :: FilePath,
+    dataCfWriteBufferSize :: Int,
+    enableDBStatistics :: Bool,
+    dbStatsDumpPeriodSec :: Int
+  }
 
 data Context = Context
   { dbHandle :: R.DB,
@@ -71,7 +76,9 @@ initialize Config {..} =
       R.openColumnFamilies
         R.defaultDBOptions
           { R.createIfMissing = True,
-            R.createMissingColumnFamilies = True
+            R.createMissingColumnFamilies = True,
+            R.enableStatistics = enableDBStatistics,
+            R.statsDumpPeriodSec = dbStatsDumpPeriodSec
           }
         rootDbPath
         [ R.ColumnFamilyDescriptor
@@ -86,7 +93,7 @@ initialize Config {..} =
             { name = dataCFName,
               options =
                 R.defaultDBOptions
-                  { R.writeBufferSize = 1024 * 1024 * 1024,
+                  { R.writeBufferSize = dataCfWriteBufferSize,
                     R.disableAutoCompactions = True,
                     R.level0FileNumCompactionTrigger = 2 ^ 29,
                     R.level0SlowdownWritesTrigger = 2 ^ 29,

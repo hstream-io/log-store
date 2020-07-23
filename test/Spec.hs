@@ -354,7 +354,14 @@ withLogStoreTest r =
           createTempDirectory Nothing "log-store-test"
         (_, ctx) <-
           allocate
-            (initialize $ Config {rootDbPath = path})
+            ( initialize $
+                Config
+                  { rootDbPath = path,
+                    dataCfWriteBufferSize = 64 * 1024 * 1024,
+                    enableDBStatistics = True,
+                    dbStatsDumpPeriodSec = 10
+                  }
+            )
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )
