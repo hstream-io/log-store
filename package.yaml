@@ -37,6 +37,7 @@ dependencies:
 - text
 - unordered-containers
 - hashable
+- atomic-primops
 
 library:
   source-dirs: src
