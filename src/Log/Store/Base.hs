@@ -43,6 +43,7 @@ import Data.IORef (IORef, newIORef)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Vector (Vector, forM)
+import Data.Word (Word32, Word64)
 import qualified Database.RocksDB as R
 import GHC.Conc (TVar, atomically, newTVarIO, readTVar, writeTVar)
 import GHC.Generics (Generic)
@@ -55,9 +56,10 @@ import qualified Streamly.Prelude as S
 -- | Config info
 data Config = Config
   { rootDbPath :: FilePath,
-    dataCfWriteBufferSize :: Int,
+    dataCfWriteBufferSize :: Word64,
+    dbWriteBufferSize :: Word64,
     enableDBStatistics :: Bool,
-    dbStatsDumpPeriodSec :: Int
+    dbStatsDumpPeriodSec :: Word32
   }
 
 data Context = Context
@@ -77,6 +79,9 @@ initialize Config {..} =
         R.defaultDBOptions
           { R.createIfMissing = True,
             R.createMissingColumnFamilies = True,
+            R.dbWriteBufferSize = dbWriteBufferSize,
+            R.maxBackgroundCompactions = 1,
+            R.maxBackgroundFlushes = 1,
             R.enableStatistics = enableDBStatistics,
             R.statsDumpPeriodSec = dbStatsDumpPeriodSec
           }
@@ -95,9 +100,11 @@ initialize Config {..} =
                 R.defaultDBOptions
                   { R.writeBufferSize = dataCfWriteBufferSize,
                     R.disableAutoCompactions = True,
-                    R.level0FileNumCompactionTrigger = 2 ^ 29,
-                    R.level0SlowdownWritesTrigger = 2 ^ 29,
-                    R.level0StopWritesTrigger = 2 ^ 29
+                    R.level0FileNumCompactionTrigger = -1,
+                    R.level0SlowdownWritesTrigger = -1,
+                    R.level0StopWritesTrigger = -1,
+                    R.softPendingCompactionBytesLimit = 18446744073709551615,
+                    R.hardPendingCompactionBytesLimit = 18446744073709551615
                   }
             }
         ]
