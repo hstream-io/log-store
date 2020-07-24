@@ -400,6 +400,7 @@ withLogStoreTest r =
                 Config
                   { rootDbPath = path,
                     dataCfWriteBufferSize = 64 * 1024 * 1024,
+                    dbWriteBufferSize = 0,
                     enableDBStatistics = True,
                     dbStatsDumpPeriodSec = 10
                   }
