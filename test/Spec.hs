@@ -373,19 +373,6 @@ appendEntryRepeat n lh = append' 1
           -- liftIO $ print id
           append' (x + 1)
 
-appendForever lh = do
-  appendEntries lh $ V.replicate 128 $ B.replicate 4096 0xff
-  appendForever lh
-
-openAndAppendForever :: MonadIO m => ReaderT Context m ()
-openAndAppendForever = do
-  lh <-
-    open
-      "log"
-      defaultOpenOptions {writeMode = True, createIfMissing = True}
-  appendEntries lh $ V.replicate 128 $ B.replicate 4096 0xff
-  openAndAppendForever
-
 -- | help run test case
 -- | wrap create temp directory
 withLogStoreTest :: MonadUnliftIO m => ReaderT Context m a -> m a

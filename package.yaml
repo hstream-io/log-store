@@ -76,3 +76,15 @@ benchmarks:
       - log-store
       - criterion
       - temporary-resourcet
+
+executables:
+  log-store-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - log-store
+      - cmdargs
