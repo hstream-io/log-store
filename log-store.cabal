@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 7c1c972f8baa9268ee0b9a3c93b933f02527accc3a13cfbedbaeb6738fd3c49c
+-- hash: bdb352183fe2ea616f2750ae3183594b888e67748e7f81cb6553a218e82b6485
 
 name:           log-store
 version:        0.1.0.0
@@ -70,6 +70,7 @@ executable log-store-exe
     , binary-strict
     , bytestring
     , bytestring-strict-builder
+    , clock
     , cmdargs
     , data-default
     , directory

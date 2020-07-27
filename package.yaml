@@ -88,3 +88,4 @@ executables:
     dependencies:
       - log-store
       - cmdargs
+      - clock
