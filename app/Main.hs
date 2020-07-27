@@ -10,7 +10,10 @@ import qualified Data.ByteString as B
 import qualified Data.Vector as V
 import Data.Word (Word32, Word64)
 import Log.Store.Base
+import Streamly.Data.Fold (Fold)
+import qualified Streamly.Internal.Data.Fold as FL
 import qualified Streamly.Prelude as S
+import System.Clock (Clock (Monotonic), TimeSpec (..), getTime)
 import System.Console.CmdArgs.Implicit
 
 data Options
@@ -75,13 +78,35 @@ main = do
           }
         ( do
             lh <- open logName defaultOpenOptions
-            readAll lh
+            -- drainAll lh
+            drainBatch 1024 lh
         )
 
-readAll :: MonadIO m => LogHandle -> ReaderT Context m ()
-readAll lh = do
+-- record read speed
+drainAll :: MonadIO m => LogHandle -> ReaderT Context m ()
+drainAll lh = do
   stream <- readEntries lh Nothing Nothing
-  liftIO $ S.drain stream
+  -- liftIO $ S.drain stream
+  liftIO $ S.mapM_ (print . fromIntegral) $ S.intervalsOf 1 FL.length stream
+
+drainBatch :: MonadIO m => EntryID -> LogHandle -> ReaderT Context m ()
+drainBatch batchSize lh = drainBatch' 1 batchSize TimeSpec {sec = 0, nsec = 0} 0
+  where
+    sampleDuration = TimeSpec {sec = 1, nsec = 0}
+
+    drainBatch' :: MonadIO m => EntryID -> EntryID -> TimeSpec -> Word64 -> ReaderT Context m ()
+    drainBatch' start end remainingTime accItem = do
+      startTime <- liftIO $ getTime Monotonic
+      stream <- readEntries lh (Just start) (Just end)
+      readNum <- liftIO $ S.length stream
+      endTime <- liftIO $ getTime Monotonic
+      let duration = endTime - startTime + remainingTime
+      let total = accItem + fromIntegral readNum
+      if duration >= sampleDuration
+        then do
+          liftIO $ print total
+          drainBatch' (end + 1) (end + batchSize) 0 0
+        else drainBatch' (end + 1) (end + batchSize) duration total
 
 nBytesEntry :: Int -> B.ByteString
 nBytesEntry n = B.replicate n 0xff
