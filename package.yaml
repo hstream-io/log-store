@@ -89,3 +89,4 @@ executables:
       - log-store
       - cmdargs
       - clock
+      - lifted-async
