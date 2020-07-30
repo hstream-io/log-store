@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: bdb352183fe2ea616f2750ae3183594b888e67748e7f81cb6553a218e82b6485
+-- hash: d94c631ed6dd8d5e613f3a2948d83f88c781ac033b6c898e8c7d0e91b5a9fdb3
 
 name:           log-store
 version:        0.1.0.0
@@ -76,6 +76,7 @@ executable log-store-exe
     , directory
     , filepath
     , hashable
+    , lifted-async
     , log-store
     , mtl
     , resourcet
