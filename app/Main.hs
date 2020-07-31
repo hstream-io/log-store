@@ -5,21 +5,19 @@
 module Main where
 
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async.Lifted (Async, async, mapConcurrently_, wait)
+import Control.Concurrent.Async.Lifted (async, mapConcurrently_, wait)
 import Control.Exception (throwIO)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Reader (ReaderT)
 import Data.Atomics (atomicModifyIORefCAS)
 import qualified Data.ByteString as B
-import Data.Function ((&))
 import qualified Data.HashMap.Strict as H
 import Data.IORef (IORef, newIORef)
 import qualified Data.Text as T
 import qualified Data.Vector as V
-import Data.Word (Word32, Word64)
+import Data.Word (Word64)
 import Log.Store.Base
-import Streamly.Data.Fold (Fold)
 import qualified Streamly.Internal.Data.Fold as FL
 import qualified Streamly.Prelude as S
 import System.Clock (Clock (Monotonic), TimeSpec (..), getTime)
@@ -37,6 +35,15 @@ data Options
   | Read
       { dbPath :: FilePath,
         logName :: LogName
+      }
+  | Mix
+      { dbPath :: FilePath,
+        logNamePrefix :: T.Text,
+        writeTotalSize :: Int,
+        writeBatchSize :: Int,
+        writeEntrySize :: Int,
+        readBatchSize :: Int,
+        logNum :: Int
       }
   deriving (Show, Data, Typeable)
 
@@ -58,18 +65,30 @@ readOpts =
     }
     &= help "read"
 
+mixOpts =
+  Mix
+    { writeTotalSize = 1024 &= help "total kv sizes ready to append to a single log (MB)",
+      writeBatchSize = 64 &= help "number of entries in a batch",
+      writeEntrySize = 128 &= help "size of each entry (byte)",
+      readBatchSize = 1024 &= help "num of entry each read",
+      dbPath = "/tmp/rocksdb" &= help "which to store data",
+      logNamePrefix = "log" &= help "name prefix of logs to write",
+      logNum = 1 &= help "num of log to write"
+    }
+    &= help "mix"
+
 main :: IO ()
 main = do
-  opts <- cmdArgs (modes [appendOpts, readOpts])
+  opts <- cmdArgs (modes [appendOpts, readOpts, mixOpts])
   case opts of
     Append {..} -> do
       numRef <- newIORef (0 :: Integer)
       let dict = H.singleton appendedEntryNumKey numRef
-      printAppendSpeed dict entrySize 0
+      printAppendSpeed dict entrySize
       withLogStore
         Config
           { rootDbPath = dbPath,
-            dataCfWriteBufferSize = 1024 * 1024 * 1024,
+            dataCfWriteBufferSize = 200 * 1024 * 1024,
             dbWriteBufferSize = 0,
             enableDBStatistics = True,
             dbStatsDumpPeriodSec = 2
@@ -79,7 +98,7 @@ main = do
       withLogStore
         Config
           { rootDbPath = dbPath,
-            dataCfWriteBufferSize = 1024 * 1024 * 1024,
+            dataCfWriteBufferSize = 200 * 1024 * 1024,
             dbWriteBufferSize = 0,
             enableDBStatistics = True,
             dbStatsDumpPeriodSec = 30
@@ -88,6 +107,26 @@ main = do
             lh <- open logName defaultOpenOptions
             -- drainAll lh
             drainBatch 1024 lh
+        )
+    Mix {..} -> do
+      appendedNumRef <- newIORef (0 :: Integer)
+      readNumRef <- newIORef (0 :: Integer)
+      let dict = H.insert readEntryNumKey readNumRef $ H.singleton appendedEntryNumKey appendedNumRef
+      printAppendAndReadSpeed dict writeEntrySize
+      withLogStore
+        Config
+          { rootDbPath = dbPath,
+            dataCfWriteBufferSize = 200 * 1024 * 1024,
+            dbWriteBufferSize = 0,
+            enableDBStatistics = True,
+            dbStatsDumpPeriodSec = 2
+          }
+        ( do
+            appendResult <- async (mapConcurrently_ (appendTask dict writeTotalSize writeEntrySize writeBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
+            liftIO $ threadDelay 10000000
+            readResult <- async (mapConcurrently_ (readTask dict readBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
+            wait appendResult
+            wait readResult
         )
 
 appendTask ::
@@ -103,6 +142,30 @@ appendTask dict totalSize entrySize batchSize logName = do
   let batchNum = (totalSize * 1024 * 1024) `div` (batchSize * entrySize)
   writeNBytesEntriesBatch dict lh entrySize batchSize batchNum
   return ()
+
+readTask ::
+  MonadIO m =>
+  H.HashMap B.ByteString (IORef Integer) ->
+  Int ->
+  LogName ->
+  ReaderT Context m ()
+readTask dict batchSize logName = do
+  lh <- open logName defaultOpenOptions
+  readBatch lh 1 $ fromIntegral batchSize
+  where
+    readBatch :: MonadIO m => LogHandle -> EntryID -> EntryID -> ReaderT Context m ()
+    readBatch lh start end = do
+      stream <- readEntries lh (Just start) (Just end)
+      readNum <- liftIO $ S.length stream
+      if readNum == 0
+        then do
+          liftIO $ threadDelay 10000
+          readBatch lh start end
+        else do
+          increaseBy dict readEntryNumKey $ toInteger readNum
+          let nextStart = start + fromIntegral readNum
+          let nextEnd = nextStart + fromIntegral batchSize - 1
+          readBatch lh nextStart nextEnd
 
 -- record read speed
 drainAll :: MonadIO m => LogHandle -> ReaderT Context m ()
@@ -135,6 +198,9 @@ nBytesEntry n = B.replicate n 0xff
 
 appendedEntryNumKey :: B.ByteString
 appendedEntryNumKey = "appendedEntryNum"
+
+readEntryNumKey :: B.ByteString
+readEntryNumKey = "readEntryNum"
 
 writeNBytesEntriesBatch ::
   MonadIO m =>
@@ -180,15 +246,33 @@ periodRun initDelay interval action = do
       action
   return ()
 
-printAppendSpeed :: H.HashMap B.ByteString (IORef Integer) -> Int -> Integer -> IO ()
-printAppendSpeed dict entrySize lastNum = do
+printAppendSpeed :: H.HashMap B.ByteString (IORef Integer) -> Int -> IO ()
+printAppendSpeed dict entrySize = do
   forkIO $ do
-    threadDelay $ 1000000
-    forever $ printSpeed 0
+    printSpeed 0
   return ()
   where
     printSpeed num = do
-      threadDelay 1000000
+      threadDelay 3000000
       curNum <- increaseBy dict appendedEntryNumKey 0
-      print $ fromInteger ((curNum - num) * toInteger entrySize) / 1024 / 1024
+      print $ fromInteger ((curNum - num) * toInteger entrySize) / 1024 / 1024 / 3
       printSpeed curNum
+
+printAppendAndReadSpeed :: H.HashMap B.ByteString (IORef Integer) -> Int -> IO ()
+printAppendAndReadSpeed dict entrySize = do
+  forkIO $ do
+    printSpeed 0 0
+  return ()
+  where
+    printSpeed prevAppendedNum prevReadNum = do
+      threadDelay 3000000
+      curAppendedNum <- increaseBy dict appendedEntryNumKey 0
+      curReadNum <- increaseBy dict readEntryNumKey 0
+      putStrLn $
+        "append: "
+          ++ show (fromInteger ((curAppendedNum - prevAppendedNum) * toInteger entrySize) / 1024 / 1024 / 3)
+          ++ " MB/s, "
+          ++ "read: "
+          ++ show (fromInteger ((curReadNum - prevReadNum) * toInteger entrySize) / 1024 / 1024 / 3)
+          ++ " MB/s"
+      printSpeed curAppendedNum curReadNum
