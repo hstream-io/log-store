@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: d94c631ed6dd8d5e613f3a2948d83f88c781ac033b6c898e8c7d0e91b5a9fdb3
+-- hash: 611514eedf1c3ca46acd19ae9fa338b08109da42aaf9b5fec843d734128e8355
 
 name:           log-store
 version:        0.1.0.0
@@ -63,7 +63,7 @@ executable log-store-exe
       Paths_log_store
   hs-source-dirs:
       app
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -W
   build-depends:
       atomic-primops
     , base >=4.7 && <5
