@@ -7,7 +7,7 @@ module Main where
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async.Lifted (async, mapConcurrently_, wait)
 import Control.Exception (throwIO)
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Reader (ReaderT)
 import Data.Atomics (atomicModifyIORefCAS)
@@ -124,7 +124,7 @@ main = do
         ( do
             appendResult <- async (mapConcurrently_ (appendTask dict writeTotalSize writeEntrySize writeBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
             liftIO $ threadDelay 10000000
-            readResult <- async (mapConcurrently_ (readTask dict readBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
+            readResult <- async (mapConcurrently_ (readTask (nBytesEntry writeEntrySize) dict readBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
             wait appendResult
             wait readResult
         )
@@ -145,22 +145,30 @@ appendTask dict totalSize entrySize batchSize logName = do
 
 readTask ::
   MonadIO m =>
+  B.ByteString ->
   H.HashMap B.ByteString (IORef Integer) ->
   Int ->
   LogName ->
   ReaderT Context m ()
-readTask dict batchSize logName = do
+readTask expectedEntry dict batchSize logName = do
   lh <- open logName defaultOpenOptions
   readBatch lh 1 $ fromIntegral batchSize
   where
     readBatch :: MonadIO m => LogHandle -> EntryID -> EntryID -> ReaderT Context m ()
     readBatch lh start end = do
       stream <- readEntries lh (Just start) (Just end)
+      liftIO $
+        S.mapM_
+          ( \res -> do
+              when (fst res /= expectedEntry) $ do
+                putStrLn $ "read entry error, got: " ++ show res
+                throwIO $ userError "read entry error"
+          )
+          stream
       readNum <- liftIO $ S.length stream
       if readNum == 0
         then do
-          liftIO $ threadDelay 10000
-          readBatch lh start end
+          liftIO $ putStrLn "read finish"
         else do
           increaseBy dict readEntryNumKey $ toInteger readNum
           let nextStart = start + fromIntegral readNum
@@ -194,7 +202,7 @@ drainBatch batchSize lh = drainBatch' 1 batchSize TimeSpec {sec = 0, nsec = 0} 0
         else drainBatch' (end + 1) (end + batchSize) duration total
 
 nBytesEntry :: Int -> B.ByteString
-nBytesEntry n = B.replicate n 0xff
+nBytesEntry n = B.replicate n 0xf0
 
 appendedEntryNumKey :: B.ByteString
 appendedEntryNumKey = "appendedEntryNum"
