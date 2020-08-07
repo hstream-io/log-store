@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
 
 module Main where
 
@@ -8,14 +9,18 @@ import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.UTF8 as U
 import Data.Function ((&))
 import Data.List (sort)
 import qualified Data.Vector as V
+import Data.Word (Word64)
 import Log.Store.Base
   ( Config (..),
     Context,
-    LogHandle (..),
+    Entry,
+    EntryID,
+    LogHandle,
     appendEntries,
     appendEntry,
     create,
@@ -148,7 +153,7 @@ main = hspec $
               liftIO $ S.toList s
           )
           `shouldReturn` [("entry1", 1), ("entry2", 2), ("entry3", 3)]
-      it "put some entries to multiple logs and read them" $
+      it "put some entries to multiple logs and read them (1)" $
         withLogStoreTest
           ( do
               lh1 <-
@@ -184,6 +189,25 @@ main = hspec $
                            [("log2-entry1", 1), ("log2-entry2", 2), ("log2-entry3", 3)],
                            [("log3-entry1", 1), ("log3-entry2", 2), ("log3-entry3", 3)]
                          ]
+      it "put some entries to multiple logs and read them (2)" $
+        withLogStoreTest
+          ( do
+              lh1 <-
+                open
+                  "log1"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              lh2 <-
+                open
+                  "log2"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              appendEntry lh2 "log2-entry1"
+              appendEntry lh2 "log2-entry2"
+              appendEntry lh2 "log2-entry3"
+              s1 <- readEntries lh1 Nothing Nothing
+              r1 <- liftIO $ S.toList s1
+              return r1
+          )
+          `shouldReturn` []
       it "append entries to a log and read them " $
         withLogStoreTest
           ( do
@@ -203,7 +227,7 @@ main = hspec $
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              appendEntryRepeat 300 logHandle
+              appendEntryRepeat 300 logHandle ""
               s <- readEntries logHandle Nothing Nothing
               liftIO $ s & S.map snd & S.toList
           )
@@ -215,12 +239,12 @@ main = hspec $
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              appendEntryRepeat 300 lh1
+              appendEntryRepeat 300 lh1 ""
               lh2 <-
                 open
                   "log"
                   defaultOpenOptions {writeMode = True}
-              appendEntryRepeat 300 lh2
+              appendEntryRepeat 300 lh2 ""
               lh3 <-
                 open
                   "log"
@@ -285,9 +309,9 @@ main = hspec $
                         open
                           "log1"
                           defaultOpenOptions {writeMode = True, createIfMissing = True}
-                      appendEntryRepeat 300 logHandle
+                      appendEntryRepeat 3 logHandle "l1"
                       s <- readEntries logHandle Nothing Nothing
-                      liftIO $ s & S.map snd & S.toList
+                      liftIO $ s & S.toList
                   )
               c2 <-
                 async
@@ -296,9 +320,9 @@ main = hspec $
                         open
                           "log2"
                           defaultOpenOptions {writeMode = True, createIfMissing = True}
-                      appendEntryRepeat 300 logHandle
+                      appendEntryRepeat 3 logHandle "l2"
                       s <- readEntries logHandle Nothing Nothing
-                      liftIO $ s & S.map snd & S.toList
+                      liftIO $ s & S.toList
                   )
               c3 <-
                 async
@@ -307,16 +331,16 @@ main = hspec $
                         open
                           "log3"
                           defaultOpenOptions {writeMode = True, createIfMissing = True}
-                      appendEntryRepeat 300 logHandle
+                      appendEntryRepeat 3 logHandle "l3"
                       s <- readEntries logHandle Nothing Nothing
-                      liftIO $ s & S.map snd & S.toList
+                      liftIO $ s & S.toList
                   )
               r1 <- wait c1
               r2 <- wait c2
               r3 <- wait c3
               return [r1, r2, r3]
           )
-          `shouldReturn` [[1 .. 300], [1 .. 300], [1 .. 300]]
+          `shouldReturn` [generateReadResult 3 "l1", generateReadResult 3 "l2", generateReadResult 3 "l3"]
       it "concurrent append to the same log" $
         withLogStoreTest
           ( do
@@ -328,7 +352,7 @@ main = hspec $
                         open
                           "log"
                           defaultOpenOptions {writeMode = True}
-                      appendEntryRepeat 300 logHandle
+                      appendEntryRepeat 300 logHandle ""
                       return logHandle
                   )
               c2 <-
@@ -338,7 +362,7 @@ main = hspec $
                         open
                           "log"
                           defaultOpenOptions {writeMode = True}
-                      appendEntryRepeat 300 logHandle
+                      appendEntryRepeat 300 logHandle ""
                       return logHandle
                   )
               c3 <-
@@ -348,7 +372,7 @@ main = hspec $
                         open
                           "log"
                           defaultOpenOptions {writeMode = True}
-                      appendEntryRepeat 300 logHandle
+                      appendEntryRepeat 300 logHandle ""
                       return logHandle
                   )
               wait c1
@@ -360,16 +384,17 @@ main = hspec $
           `shouldReturn` [1 .. 900]
 
 -- | append n entries to a log
-appendEntryRepeat n lh = append' 1
+appendEntryRepeat :: MonadIO m => Int -> LogHandle -> String -> ReaderT Context m EntryID
+appendEntryRepeat n lh entryPrefix = append' 1
   where
     append' x =
       if (x == n)
         then do
-          id <- appendEntry lh "entry"
+          id <- appendEntry lh $ C.pack $ entryPrefix ++ testEntryContent
           -- liftIO $ print id
           return id
         else do
-          id <- appendEntry lh "entry"
+          id <- appendEntry lh $ C.pack $ entryPrefix ++ testEntryContent
           -- liftIO $ print id
           append' (x + 1)
 
@@ -395,3 +420,9 @@ withLogStoreTest r =
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )
+
+generateReadResult :: Word64 -> String -> [(Entry, EntryID)]
+generateReadResult num entryPrefix = map (C.pack $ entryPrefix ++ testEntryContent,) [1 .. num]
+
+testEntryContent :: String
+testEntryContent = "entry"

@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Log.Store.Base
@@ -68,7 +69,8 @@ data Context = Context
     defaultCFHandle :: R.ColumnFamily,
     metaCFHandle :: R.ColumnFamily,
     dataCFHandle :: R.ColumnFamily,
-    logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle)
+    logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle),
+    maxLogIdRef :: IORef LogID
   }
 
 -- | init Context using Config
@@ -110,18 +112,31 @@ initialize Config {..} =
             }
         ]
     cache <- newTVarIO H.empty
+    maxLogId <- getMaxLogId db metaCF
+    logIdRef <- newIORef maxLogId
     return
       Context
         { dbHandle = db,
           defaultCFHandle = defaultCF,
           metaCFHandle = metaCF,
           dataCFHandle = dataCF,
-          logHandleCache = cache
+          logHandleCache = cache,
+          maxLogIdRef = logIdRef
         }
   where
     dataCFName = "data"
     metaCFName = "meta"
     defaultCFName = "default"
+
+    getMaxLogId :: R.DB -> R.ColumnFamily -> IO LogID
+    getMaxLogId db cf = do
+      maxLogId <- R.getCF db def cf maxLogIdKey
+      case maxLogId of
+        Nothing -> do
+          let initLogId = 0
+          R.putCF db def cf maxLogIdKey $ encodeWord64 initLogId
+          return initLogId
+        Just v -> return (decodeWord64 v)
 
 -- | open options
 data OpenOptions = OpenOptions
@@ -268,10 +283,10 @@ create name = do
           LogStoreLogAlreadyExistsException $ "log " ++ T.unpack name ++ " already existed"
     else do
       Context {..} <- ask
-      R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle
+      R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle maxLogIdRef
   where
-    initLog db metaCf dataCf batch = do
-      logId <- generateLogId db metaCf
+    initLog db metaCf dataCf maxLogIdRef batch = do
+      logId <- generateLogId db metaCf maxLogIdRef
       R.batchPutCF batch metaCf (encodeLogName name) (encodeLogId logId)
       R.batchPutCF
         batch
@@ -330,6 +345,7 @@ readEntries LogHandle {..} firstKey lastKey = do
   return $
     kvStream
       & S.map (first decodeEntryKey)
+      -- & S.filter (\(EntryKey logId _, _) -> logId == logID)
       & S.map (\(EntryKey _ entryId, entry) -> (entry, entryId))
   where
     start =
