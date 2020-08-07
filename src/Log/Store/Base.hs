@@ -33,6 +33,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
+import Data.Bifunctor (first)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as U
 import Data.Default (def)
@@ -276,7 +277,7 @@ create name = do
         batch
         dataCf
         (encodeEntryKey $ EntryKey logId minEntryId)
-        (encodeInnerEntry $ InnerEntry minEntryId $ U.fromString "first entry")
+        (U.fromString "first entry")
       R.write db def batch
       return logId
 
@@ -287,13 +288,12 @@ appendEntry LogHandle {..} entry = do
   if writeMode openOptions
     then do
       entryId <- generateEntryId maxEntryIdRef
-      let valueBstr = encodeInnerEntry $ InnerEntry entryId entry
       R.putCF
         dbHandle
         R.defaultWriteOptions {R.disableWAL = True}
         dataCFHandle
         (encodeEntryKey $ EntryKey logID entryId)
-        valueBstr
+        entry
       return entryId
     else
       liftIO $
@@ -315,10 +315,9 @@ appendEntries LogHandle {..} entries = do
       where
         batchAdd entry = do
           entryId <- generateEntryId maxEntryIdRef
-          R.batchPutCF batch cf (encodeEntryKey $ EntryKey logID entryId) (encodeInnerEntry $ InnerEntry entryId entry)
+          R.batchPutCF batch cf (encodeEntryKey $ EntryKey logID entryId) entry
           return entryId
 
--- | read entries whose entryId in [firstEntry, LastEntry]
 readEntries ::
   MonadIO m =>
   LogHandle ->
@@ -327,18 +326,17 @@ readEntries ::
   ReaderT Context m (Serial (Entry, EntryID))
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
-  let kvStream = R.rangeCF dbHandle def dataCFHandle first last
+  let kvStream = R.rangeCF dbHandle def dataCFHandle start end
   return $
     kvStream
-      & S.map snd
-      & S.map decodeInnerEntry
-      & S.map (\(InnerEntry entryId entry) -> (entry, entryId))
+      & S.map (first decodeEntryKey)
+      & S.map (\(EntryKey _ entryId, entry) -> (entry, entryId))
   where
-    first =
+    start =
       case firstKey of
         Nothing -> Just $ encodeEntryKey $ EntryKey logID firstNormalEntryId
         Just k -> Just $ encodeEntryKey $ EntryKey logID k
-    last =
+    end =
       case lastKey of
         Nothing -> Just $ encodeEntryKey $ EntryKey logID maxEntryId
         Just k -> Just $ encodeEntryKey $ EntryKey logID k
