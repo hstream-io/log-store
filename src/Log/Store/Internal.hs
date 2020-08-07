@@ -3,11 +3,11 @@
 
 module Log.Store.Internal where
 
-import ByteString.StrictBuilder (builderBytes, bytes, word64BE)
+import ByteString.StrictBuilder (builderBytes, word64BE)
 import Control.Exception (throw)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Atomics (atomicModifyIORefCAS)
-import Data.Binary.Strict.Get as BinStrict
+import Data.Binary.Strict.Get (getWord64be, runGet)
 import Data.ByteString as B
 import Data.Default (def)
 import Data.IORef (IORef)
@@ -45,29 +45,6 @@ maxEntryId = 0xffffffffffffffff
 
 firstNormalEntryId :: EntryID
 firstNormalEntryId = 1
-
--- | entry content with some meta info
-data InnerEntry = InnerEntry EntryID B.ByteString
-  deriving (Eq, Show)
-
-encodeInnerEntry :: InnerEntry -> B.ByteString
-encodeInnerEntry (InnerEntry entryId content) =
-  builderBytes $ word64BE entryId `mappend` bytes content
-
-decodeInnerEntry :: B.ByteString -> InnerEntry
-decodeInnerEntry bs =
-  if rem /= B.empty
-    then throw $ LogStoreDecodeException "input error"
-    else case res of
-      Left s -> throw $ LogStoreDecodeException s
-      Right v -> v
-  where
-    (res, rem) = decode' bs
-    decode' = runGet $ do
-      entryId <- getWord64be
-      len <- remaining
-      content <- getByteString len
-      return $ InnerEntry entryId content
 
 -- | key used when save entry to rocksdb
 data EntryKey = EntryKey LogID EntryID
