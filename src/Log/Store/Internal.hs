@@ -28,6 +28,9 @@ decodeLogName = decodeText
 -- | Log Id
 type LogID = Word64
 
+maxLogIdKey :: B.ByteString
+maxLogIdKey = "maxLogId"
+
 encodeLogId :: LogID -> B.ByteString
 encodeLogId = encodeWord64
 
@@ -69,27 +72,12 @@ decodeEntryKey bs =
 
 -- | it is used to generate a new logId while
 -- | creating a new log.
--- |
--- | todo:
--- | exception need to consider
-generateLogId :: MonadIO m => R.DB -> R.ColumnFamily -> m LogID
-generateLogId db cf =
-  do
-    oldId <- R.getCF db def cf maxLogIdKey
-    case oldId of
-      Nothing -> do
-        R.putCF db def cf maxLogIdKey (encodeWord64 1)
-        return 1
-      Just oid -> updateLogId oid
-  where
-    maxLogIdKey = "maxLogId"
-    updateLogId oldId =
-      do
-        R.putCF db def cf maxLogIdKey (encodeWord64 newLogId)
-        return newLogId
-      where
-        newLogId :: Word64
-        newLogId = decodeWord64 oldId + 1
+generateLogId :: MonadIO m => R.DB -> R.ColumnFamily -> IORef LogID -> m LogID
+generateLogId db cf logIdRef =
+  liftIO $ do
+    newId <- atomicModifyIORefCAS logIdRef (\curId -> (curId + 1, curId + 1))
+    R.putCF db def cf maxLogIdKey (encodeWord64 newId)
+    return newId
 
 -- | generate entry Id
 -- |
