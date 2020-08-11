@@ -12,6 +12,7 @@ import Data.ByteString as B
 import Data.Default (def)
 import Data.IORef (IORef)
 import Data.Text as T
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Word (Word64)
 import qualified Database.RocksDB as R
 import Log.Store.Exception
@@ -85,3 +86,17 @@ generateEntryId :: MonadIO m => IORef EntryID -> m EntryID
 generateEntryId entryIdRef =
   liftIO $
     atomicModifyIORefCAS entryIdRef (\curId -> (curId + 1, curId + 1))
+
+defaultCFName :: String
+defaultCFName = "default"
+
+metaCFName :: String
+metaCFName = "meta"
+
+dataCFNamePrefix :: String
+dataCFNamePrefix = "data-"
+
+generateDataCfName :: MonadIO m => m String
+generateDataCfName = liftIO $ do
+  posixTime <- getPOSIXTime
+  return $ dataCFNamePrefix ++ show (posixTimeToSeconds posixTime)

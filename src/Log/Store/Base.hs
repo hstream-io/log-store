@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
 
 module Log.Store.Base
   ( -- * Exported Types
@@ -26,14 +27,19 @@ module Log.Store.Base
 
     -- * Options
     defaultOpenOptions,
+    defaultConfig,
   )
 where
 
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (Async, async, cancel)
 import Control.Exception (throwIO)
+import Control.Monad (foldM, when, forever)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
+import Data.Atomics (atomicModifyIORefCAS)
 import Data.Bifunctor (first)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as U
@@ -41,10 +47,11 @@ import Data.Default (def)
 import Data.Function ((&))
 import qualified Data.HashMap.Strict as H
 import Data.Hashable (Hashable)
-import Data.IORef (IORef, newIORef)
+import Data.IORef (IORef, newIORef, readIORef)
+import Data.List.NonEmpty (fromList)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
-import Data.Vector (Vector, forM)
+import qualified Data.Vector as V
 import Data.Word (Word32, Word64)
 import qualified Database.RocksDB as R
 import GHC.Conc (TVar, atomically, newTVarIO, readTVar, writeTVar)
@@ -52,41 +59,82 @@ import GHC.Generics (Generic)
 import Log.Store.Exception
 import Log.Store.Internal
 import Log.Store.Utils
-import Streamly (Serial)
+import Streamly (Serial, sconcat)
 import qualified Streamly.Prelude as S
 
 -- | Config info
 data Config = Config
   { rootDbPath :: FilePath,
     dataCfWriteBufferSize :: Word64,
-    dbWriteBufferSize :: Word64,
     enableDBStatistics :: Bool,
-    dbStatsDumpPeriodSec :: Word32
+    dbStatsDumpPeriodSec :: Word32,
+    dataCfPartitionDuration :: Int, -- minutes
+    dataCfPartitionSizeLimit :: Int -- GB
   }
+
+defaultConfig :: Config
+defaultConfig =
+  Config
+    { rootDbPath = "/tmp/log-store/rocksdb",
+      dataCfWriteBufferSize = 200 * 1024 * 1024,
+      enableDBStatistics = False,
+      dbStatsDumpPeriodSec = 600,
+      dataCfPartitionDuration = 15, -- minutes
+      dataCfPartitionSizeLimit = 6 -- GB
+    }
 
 data Context = Context
-  { dbHandle :: R.DB,
+  { dbPath :: FilePath,
+    dbHandle :: R.DB,
     defaultCFHandle :: R.ColumnFamily,
     metaCFHandle :: R.ColumnFamily,
-    dataCFHandle :: R.ColumnFamily,
+    curDataCFHandleRef :: IORef R.ColumnFamily,
+    curDataCFSizeRef :: IORef Word64,
+    dataCfHandlesForReadRef :: IORef [R.ColumnFamily],
     logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle),
-    maxLogIdRef :: IORef LogID
+    maxLogIdRef :: IORef LogID,
+    backgroundShardingTask :: Async ()
   }
 
+shardingTask ::
+  Int ->
+  Int ->
+  IORef Word64 ->
+  R.DB ->
+  IORef R.ColumnFamily ->
+  IORef [R.ColumnFamily] ->
+  IO ()
+shardingTask
+  partitionDuration
+  partitionSizeLimit
+  curDataCfSizeRef
+  db
+  curDataCfRef
+  dataCfsForReadRef = forever $ do
+    threadDelay $ partitionDuration * 60 * 1000000
+    curDataCfSize <- readIORef curDataCfSizeRef
+    when
+      (curDataCfSize >= fromIntegral partitionSizeLimit * 1024 * 1024 * 1024)
+      $ do
+        newDataCfName <- generateDataCfName
+        newCfHandle <- R.createColumnFamily db def newDataCfName
+        atomicModifyIORefCAS dataCfsForReadRef (\cfs -> (cfs ++ [newCfHandle], cfs))
+        atomicModifyIORefCAS curDataCfRef (newCfHandle,)
+        atomicModifyIORefCAS curDataCfSizeRef (0,)
+        return ()
+
 -- | init Context using Config
+-- 1. open (or create) db, metaCF, create a new dataCF
+-- 2. init context variables: logHandleCache, maxLogIdRef
+-- 3. start background task: shardingTask
 initialize :: MonadIO m => Config -> m Context
 initialize Config {..} =
   liftIO $ do
-    (db, [defaultCF, metaCF, dataCF]) <-
+    tempDbResource <-
       R.openColumnFamilies
         R.defaultDBOptions
           { R.createIfMissing = True,
-            R.createMissingColumnFamilies = True,
-            R.dbWriteBufferSize = dbWriteBufferSize,
-            R.maxBackgroundCompactions = 1,
-            R.maxBackgroundFlushes = 1,
-            R.enableStatistics = enableDBStatistics,
-            R.statsDumpPeriodSec = dbStatsDumpPeriodSec
+            R.createMissingColumnFamilies = True
           }
         rootDbPath
         [ R.ColumnFamilyDescriptor
@@ -96,38 +144,73 @@ initialize Config {..} =
           R.ColumnFamilyDescriptor
             { name = metaCFName,
               options = R.defaultDBOptions
-            },
-          R.ColumnFamilyDescriptor
-            { name = dataCFName,
-              options =
-                R.defaultDBOptions
-                  { R.writeBufferSize = dataCfWriteBufferSize,
-                    R.disableAutoCompactions = True,
-                    R.level0FileNumCompactionTrigger = -1,
-                    R.level0SlowdownWritesTrigger = -1,
-                    R.level0StopWritesTrigger = -1,
-                    R.softPendingCompactionBytesLimit = 18446744073709551615,
-                    R.hardPendingCompactionBytesLimit = 18446744073709551615
-                  }
             }
         ]
+    releaseDbResource tempDbResource
+
+    cfNames <- R.listColumnFamilies def rootDbPath
+    let cfDescriptors = map (\cfName -> R.ColumnFamilyDescriptor {name = cfName, options = def}) cfNames
+    (db, cfHandles) <-
+      R.openColumnFamilies
+        R.defaultDBOptions
+          { R.createIfMissing = True,
+            R.createMissingColumnFamilies = True,
+            R.maxBackgroundCompactions = 1,
+            R.maxBackgroundFlushes = 1,
+            R.enableStatistics = enableDBStatistics,
+            R.statsDumpPeriodSec = dbStatsDumpPeriodSec
+          }
+        rootDbPath
+        cfDescriptors
+
+    newDataCfName <- generateDataCfName
+    newDataCfHandle <-
+      R.createColumnFamily
+        db
+        R.defaultDBOptions
+          { R.writeBufferSize = dataCfWriteBufferSize,
+            R.disableAutoCompactions = True,
+            R.level0FileNumCompactionTrigger = -1,
+            R.level0SlowdownWritesTrigger = -1,
+            R.level0StopWritesTrigger = -1,
+            R.softPendingCompactionBytesLimit = 18446744073709551615,
+            R.hardPendingCompactionBytesLimit = 18446744073709551615
+          }
+        newDataCfName
+
+    let defaultCf = head cfHandles
+    let metaCf = head $ tail cfHandles
+    let dataCfsForRead = tail $ tail $ cfHandles ++ [newDataCfHandle]
+
     cache <- newTVarIO H.empty
-    maxLogId <- getMaxLogId db metaCF
+    maxLogId <- getMaxLogId db metaCf
     logIdRef <- newIORef maxLogId
+    newDataCfRef <- newIORef newDataCfHandle
+    newDataCfSizeRef <- newIORef 0
+    dataCfsForReadRef <- newIORef dataCfsForRead
+    bgShardingTask <-
+      async $
+        shardingTask
+          dataCfPartitionDuration
+          dataCfPartitionSizeLimit
+          newDataCfSizeRef
+          db
+          newDataCfRef
+          dataCfsForReadRef
     return
       Context
-        { dbHandle = db,
-          defaultCFHandle = defaultCF,
-          metaCFHandle = metaCF,
-          dataCFHandle = dataCF,
+        { dbPath = rootDbPath,
+          dbHandle = db,
+          defaultCFHandle = defaultCf,
+          metaCFHandle = metaCf,
+          curDataCFHandleRef = newDataCfRef,
+          curDataCFSizeRef = newDataCfSizeRef,
+          dataCfHandlesForReadRef = dataCfsForReadRef,
           logHandleCache = cache,
-          maxLogIdRef = logIdRef
+          maxLogIdRef = logIdRef,
+          backgroundShardingTask = bgShardingTask
         }
   where
-    dataCFName = "data"
-    metaCFName = "meta"
-    defaultCFName = "default"
-
     getMaxLogId :: R.DB -> R.ColumnFamily -> IO LogID
     getMaxLogId db cf = do
       maxLogId <- R.getCF db def cf maxLogIdKey
@@ -251,21 +334,49 @@ open name opts@OpenOptions {..} = do
 getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m EntryID
 getMaxEntryId logId = do
   Context {..} <- ask
-  R.withIteratorCF dbHandle def dataCFHandle findMaxEntryId
+  dataCfs <- liftIO $ readIORef dataCfHandlesForReadRef
+  res <- foldM (f dbHandle) Nothing (reverse dataCfs)
+  case res of
+    Nothing -> liftIO $ throwIO $ LogStoreIOException $ "getMaxEntryId found nothing"
+    Just r -> return r
   where
-    findMaxEntryId iterator = do
+    f dbHandleForRead prevRes curCf = do
+      case prevRes of
+        Nothing -> R.withIteratorCF dbHandleForRead def curCf findMaxEntryIdInCf
+        Just res -> return $ Just res
+
+    findMaxEntryIdInCf :: MonadIO m => R.Iterator -> m (Maybe EntryID)
+    findMaxEntryIdInCf iterator = do
       R.seekForPrev iterator (encodeEntryKey $ EntryKey logId maxEntryId)
       isValid <- R.valid iterator
       if isValid
         then do
           entryKey <- R.key iterator
           let (EntryKey _ entryId) = decodeEntryKey entryKey
-          return entryId
+          return $ Just entryId
         else do
           errStr <- R.getError iterator
           case errStr of
-            Nothing -> throwIO $ LogStoreIOException "getMaxEntryId occurs error"
-            Just str -> throwIO $ LogStoreIOException $ "getMaxEntryId error: " ++ str
+            Nothing -> return Nothing
+            Just str -> liftIO $ throwIO $ LogStoreIOException $ "getMaxEntryId error: " ++ str
+
+-- getDataCfHandlesForRead :: FilePath -> IO (R.DB, [R.ColumnFamily])
+-- getDataCfHandlesForRead dbPath = do
+--   cfNames <- R.listColumnFamilies def dbPath
+--   let dataCfNames = filter (/= metaCFName) cfNames
+--   let dataCfDescriptors = map (\cfName -> R.ColumnFamilyDescriptor {name = cfName, options = def}) dataCfNames
+--   (dbForReadOnly, handles) <-
+--     R.openForReadOnlyColumnFamilies
+--       def
+--       dbPath
+--       dataCfDescriptors
+--       False
+--   return (dbForReadOnly, tail handles)
+--
+releaseDbResource :: (R.DB, [R.ColumnFamily]) -> IO ()
+releaseDbResource (db, cfs) = do
+  mapM_ R.destroyColumnFamily cfs
+  R.close db
 
 exists :: MonadIO m => LogName -> ReaderT Context m Bool
 exists name = do
@@ -283,7 +394,8 @@ create name = do
           LogStoreLogAlreadyExistsException $ "log " ++ T.unpack name ++ " already existed"
     else do
       Context {..} <- ask
-      R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle maxLogIdRef
+      curDataCf <- liftIO $ readIORef curDataCFHandleRef
+      R.withWriteBatch $ initLog dbHandle metaCFHandle curDataCf maxLogIdRef
   where
     initLog db metaCf dataCf maxLogIdRef batch = do
       logId <- generateLogId db metaCf maxLogIdRef
@@ -303,26 +415,34 @@ appendEntry LogHandle {..} entry = do
   if writeMode openOptions
     then do
       entryId <- generateEntryId maxEntryIdRef
+      curDataCf <- liftIO $ readIORef curDataCFHandleRef
       R.putCF
         dbHandle
-        R.defaultWriteOptions {R.disableWAL = True}
-        dataCFHandle
+        R.defaultWriteOptions
+        curDataCf
         (encodeEntryKey $ EntryKey logID entryId)
         entry
+      liftIO $ atomicModifyIORefCAS curDataCFSizeRef (\curSize -> (curSize + fromIntegral (B.length entry), curSize))
       return entryId
     else
       liftIO $
         throwIO $
           LogStoreUnsupportedOperationException $ "log named " ++ T.unpack logName ++ " is not writable."
 
-appendEntries :: MonadIO m => LogHandle -> Vector Entry -> ReaderT Context m (Vector EntryID)
+appendEntries :: MonadIO m => LogHandle -> V.Vector Entry -> ReaderT Context m (V.Vector EntryID)
 appendEntries LogHandle {..} entries = do
   Context {..} <- ask
-  R.withWriteBatch $ appendEntries' dbHandle dataCFHandle
+  curDataCf <- liftIO $ readIORef curDataCFHandleRef
+  let totalSize = V.foldl' f 0 entries
+  res <- R.withWriteBatch $ appendEntries' dbHandle curDataCf
+  liftIO $ atomicModifyIORefCAS curDataCFSizeRef (\curSize -> (curSize + fromIntegral totalSize, curSize))
+  return res
   where
+    f acc cur = acc + B.length cur
+
     appendEntries' db cf batch = do
       entryIds <-
-        forM
+        V.forM
           entries
           batchAdd
       R.write db def batch
@@ -341,13 +461,23 @@ readEntries ::
   ReaderT Context m (Serial (Entry, EntryID))
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
-  let kvStream = R.rangeCF dbHandle def dataCFHandle start end
-  return $
-    kvStream
-      & S.map (first decodeEntryKey)
-      -- & S.filter (\(EntryKey logId _, _) -> logId == logID)
-      & S.map (\(EntryKey _ entryId, entry) -> (entry, entryId))
+  dataCfs <- liftIO $ readIORef dataCfHandlesForReadRef
+  streams <- mapM (readEntriesInCf dbHandle) dataCfs
+  return $ sconcat $ fromList streams
   where
+    --    readEntriesInCf ::
+    --      MonadIO m =>
+    --      R.DB ->
+    --      R.ColumnFamily ->
+    --      ReaderT Context m (Serial (Entry, EntryID))
+    readEntriesInCf db dataCf = do
+      let kvStream = R.rangeCF db def dataCf start end
+      return $
+        kvStream
+          & S.map (first decodeEntryKey)
+          -- & S.filter (\(EntryKey logId _, _) -> logId == logID)
+          & S.map (\(EntryKey _ entryId, entry) -> (entry, entryId))
+
     start =
       case firstKey of
         Nothing -> Just $ encodeEntryKey $ EntryKey logID firstNormalEntryId
@@ -370,9 +500,11 @@ close LogHandle {..} = return ()
 shutDown :: MonadIO m => ReaderT Context m ()
 shutDown = do
   Context {..} <- ask
+  liftIO $ cancel backgroundShardingTask
+  dataCfs <- liftIO $ readIORef dataCfHandlesForReadRef
   R.destroyColumnFamily defaultCFHandle
   R.destroyColumnFamily metaCFHandle
-  R.destroyColumnFamily dataCFHandle
+  mapM_ R.destroyColumnFamily dataCfs
   R.close dbHandle
 
 -- | function that wrap initialize and resource release.

@@ -86,22 +86,20 @@ main = do
       let dict = H.singleton appendedEntryNumKey numRef
       printAppendSpeed dict entrySize
       withLogStore
-        Config
+        defaultConfig
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
-            dbWriteBufferSize = 0,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 2
+            dbStatsDumpPeriodSec = 10
           }
         (mapConcurrently_ (appendTask dict totalSize entrySize batchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
     Read {..} ->
       withLogStore
-        Config
+        defaultConfig
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
-            dbWriteBufferSize = 0,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 30
+            dbStatsDumpPeriodSec = 10
           }
         ( do
             lh <- open logName defaultOpenOptions
@@ -114,12 +112,11 @@ main = do
       let dict = H.insert readEntryNumKey readNumRef $ H.singleton appendedEntryNumKey appendedNumRef
       printAppendAndReadSpeed dict writeEntrySize
       withLogStore
-        Config
+        defaultConfig
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
-            dbWriteBufferSize = 0,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 2
+            dbStatsDumpPeriodSec = 10
           }
         ( do
             mapM_ (flip open defaultOpenOptions {createIfMissing = True} . T.append logNamePrefix . T.pack . show) [1 .. logNum]

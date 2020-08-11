@@ -38,6 +38,8 @@ dependencies:
 - unordered-containers
 - hashable
 - atomic-primops
+- async
+- time
 
 library:
   source-dirs: src

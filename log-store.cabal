@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: f963e4dc84e9b55fbe712b10b4e6fa0bf1513b41b251596339a093e34384e78d
+-- hash: 64eba80fc869df632a0b50ae6636171b70e2e3f5a24454f6bf0a6ecfb2cce1e5
 
 name:           log-store
 version:        0.1.0.0
@@ -37,7 +37,8 @@ library
       src
   ghc-options: -W
   build-depends:
-      atomic-primops
+      async
+    , atomic-primops
     , base >=4.7 && <5
     , binary-strict
     , bytestring
@@ -51,6 +52,7 @@ library
     , rocksdb-haskell-bindings
     , streamly
     , text
+    , time
     , transformers
     , unordered-containers
     , utf8-string
@@ -65,7 +67,8 @@ executable log-store-exe
       app
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -W -O2
   build-depends:
-      atomic-primops
+      async
+    , atomic-primops
     , base >=4.7 && <5
     , binary-strict
     , bytestring
@@ -83,6 +86,7 @@ executable log-store-exe
     , rocksdb-haskell-bindings
     , streamly
     , text
+    , time
     , transformers
     , unordered-containers
     , utf8-string
@@ -99,6 +103,7 @@ test-suite log-store-test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       QuickCheck
+    , async
     , atomic-primops
     , base >=4.7 && <5
     , binary-strict
@@ -118,6 +123,7 @@ test-suite log-store-test
     , streamly
     , temporary-resourcet
     , text
+    , time
     , transformers
     , unordered-containers
     , utf8-string
@@ -133,7 +139,8 @@ benchmark log-store-benchmark
       bench
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -with-rtsopts=-s -fprof-auto
   build-depends:
-      atomic-primops
+      async
+    , atomic-primops
     , base >=4.7 && <5
     , binary-strict
     , bytestring
@@ -150,6 +157,7 @@ benchmark log-store-benchmark
     , streamly
     , temporary-resourcet
     , text
+    , time
     , transformers
     , unordered-containers
     , utf8-string
