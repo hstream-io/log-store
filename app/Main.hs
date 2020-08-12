@@ -20,7 +20,7 @@ import Data.Word (Word64)
 import Log.Store.Base
 import qualified Streamly.Internal.Data.Fold as FL
 import qualified Streamly.Prelude as S
-import System.Clock (Clock (Monotonic), TimeSpec (..), getTime)
+import System.Clock (Clock (Monotonic), TimeSpec (..), diffTimeSpec, getTime, toNanoSecs)
 import System.Console.CmdArgs.Implicit
 
 data Options
@@ -49,8 +49,8 @@ data Options
 
 appendOpts =
   Append
-    { totalSize = 100 &= help "total kv sizes ready to append to a single log (MB)",
-      batchSize = 64 &= help "number of entries in a batch",
+    { totalSize = -1 &= help "total kv sizes ready to append to a single log (MB), -1 means unlimit",
+      batchSize = 128 &= help "number of entries in a batch",
       entrySize = 128 &= help "size of each entry (byte)",
       dbPath = "/tmp/rocksdb" &= help "which to store data",
       logNamePrefix = "log" &= help "name prefix of logs to write",
@@ -67,8 +67,8 @@ readOpts =
 
 mixOpts =
   Mix
-    { writeTotalSize = 1024 &= help "total kv sizes ready to append to a single log (MB)",
-      writeBatchSize = 64 &= help "number of entries in a batch",
+    { writeTotalSize = -1 &= help "total kv sizes ready to append to a single log (MB), -1 means unlimit",
+      writeBatchSize = 128 &= help "number of entries in a batch",
       writeEntrySize = 128 &= help "size of each entry (byte)",
       readBatchSize = 1024 &= help "num of entry each read",
       dbPath = "/tmp/rocksdb" &= help "which to store data",
@@ -122,6 +122,7 @@ main = do
             dbStatsDumpPeriodSec = 2
           }
         ( do
+            mapM_ (flip open defaultOpenOptions {createIfMissing = True} . T.append logNamePrefix . T.pack . show) [1 .. logNum]
             appendResult <- async (mapConcurrently_ (appendTask dict writeTotalSize writeEntrySize writeBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
             liftIO $ threadDelay 10000000
             readResult <- async (mapConcurrently_ (readTask (nBytesEntry writeEntrySize) dict readBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
@@ -138,10 +139,13 @@ appendTask ::
   LogName ->
   ReaderT Context m ()
 appendTask dict totalSize entrySize batchSize logName = do
+  liftIO $ print $ "start append task for log: " ++ show logName
   lh <- open logName defaultOpenOptions {createIfMissing = True, writeMode = True}
-  let batchNum = (totalSize * 1024 * 1024) `div` (batchSize * entrySize)
-  writeNBytesEntriesBatch dict lh entrySize batchSize batchNum
-  return ()
+  if totalSize == -1
+    then writeNBytesEntriesBatchForever dict lh entrySize batchSize
+    else do
+      let batchNum = (totalSize * 1024 * 1024) `div` (batchSize * entrySize)
+      writeNBytesEntriesBatch dict lh entrySize batchSize batchNum
 
 readTask ::
   MonadIO m =>
@@ -151,6 +155,7 @@ readTask ::
   LogName ->
   ReaderT Context m ()
 readTask expectedEntry dict batchSize logName = do
+  liftIO $ print $ "start read task for log: " ++ show logName
   lh <- open logName defaultOpenOptions
   readBatch lh 1 $ fromIntegral batchSize
   where
@@ -165,13 +170,15 @@ readTask expectedEntry dict batchSize logName = do
                 throwIO $ userError "read entry error"
           )
           stream
-      readNum <- liftIO $ S.length stream
-      if readNum == 0
-        then do
-          liftIO $ putStrLn "read finish"
-        else do
+      r <- liftIO $ S.last stream
+      case r of
+        Nothing -> do
+          liftIO $ threadDelay 1000
+          readBatch lh start end
+        Just (_, lastEntryId) -> do
+          let readNum = lastEntryId - start + 1
           increaseBy dict readEntryNumKey $ toInteger readNum
-          let nextStart = start + fromIntegral readNum
+          let nextStart = lastEntryId + 1
           let nextEnd = nextStart + fromIntegral batchSize - 1
           readBatch lh nextStart nextEnd
 
@@ -232,6 +239,20 @@ writeNBytesEntriesBatch dict lh entrySize batchSize batchNum = write' lh 1
           write' lh (x + 1)
     entry = nBytesEntry entrySize
 
+writeNBytesEntriesBatchForever ::
+  MonadIO m =>
+  H.HashMap B.ByteString (IORef Integer) ->
+  LogHandle ->
+  Int ->
+  Int ->
+  ReaderT Context m ()
+writeNBytesEntriesBatchForever dict lh entrySize batchSize = forever $ write' lh
+  where
+    write' lh = do
+      appendEntries lh $ V.replicate batchSize entry
+      increaseBy dict appendedEntryNumKey $ toInteger batchSize
+    entry = nBytesEntry entrySize
+
 increaseBy ::
   MonadIO m =>
   H.HashMap B.ByteString (IORef Integer) ->
@@ -261,9 +282,12 @@ printAppendSpeed dict entrySize = do
   return ()
   where
     printSpeed num = do
+      startTime <- liftIO $ getTime Monotonic
       threadDelay 3000000
       curNum <- increaseBy dict appendedEntryNumKey 0
-      print $ fromInteger ((curNum - num) * toInteger entrySize) / 1024 / 1024 / 3
+      endTime <- liftIO $ getTime Monotonic
+      let duration = fromInteger (toNanoSecs (diffTimeSpec startTime endTime)) / 1e9
+      print $ fromInteger ((curNum - num) * toInteger entrySize) / 1024 / 1024 / duration
       printSpeed curNum
 
 printAppendAndReadSpeed :: H.HashMap B.ByteString (IORef Integer) -> Int -> IO ()
@@ -273,14 +297,17 @@ printAppendAndReadSpeed dict entrySize = do
   return ()
   where
     printSpeed prevAppendedNum prevReadNum = do
+      startTime <- liftIO $ getTime Monotonic
       threadDelay 3000000
       curAppendedNum <- increaseBy dict appendedEntryNumKey 0
       curReadNum <- increaseBy dict readEntryNumKey 0
+      endTime <- liftIO $ getTime Monotonic
+      let duration = fromInteger (toNanoSecs (diffTimeSpec startTime endTime)) / 1e9
       putStrLn $
         "append: "
-          ++ show (fromInteger ((curAppendedNum - prevAppendedNum) * toInteger entrySize) / 1024 / 1024 / 3)
+          ++ show (fromInteger ((curAppendedNum - prevAppendedNum) * toInteger entrySize) / 1024 / 1024 / duration)
           ++ " MB/s, "
           ++ "read: "
-          ++ show (fromInteger ((curReadNum - prevReadNum) * toInteger entrySize) / 1024 / 1024 / 3)
+          ++ show (fromInteger ((curReadNum - prevReadNum) * toInteger entrySize) / 1024 / 1024 / duration)
           ++ " MB/s"
       printSpeed curAppendedNum curReadNum
