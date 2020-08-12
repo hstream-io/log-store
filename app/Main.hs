@@ -14,12 +14,12 @@ import Data.Atomics (atomicModifyIORefCAS)
 import qualified Data.ByteString as B
 import qualified Data.HashMap.Strict as H
 import Data.IORef (IORef, newIORef)
+import Data.Sequence (Seq (..))
+import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import Data.Word (Word64)
 import Log.Store.Base
-import qualified Streamly.Internal.Data.Fold as FL
-import qualified Streamly.Prelude as S
 import System.Clock (Clock (Monotonic), TimeSpec (..), diffTimeSpec, getTime, toNanoSecs)
 import System.Console.CmdArgs.Implicit
 
@@ -34,7 +34,10 @@ data Options
       }
   | Read
       { dbPath :: FilePath,
-        logName :: LogName
+        entrySize :: Int,
+        readBatchSize :: Int,
+        logNamePrefix :: T.Text,
+        logNum :: Int
       }
   | Mix
       { dbPath :: FilePath,
@@ -61,7 +64,10 @@ appendOpts =
 readOpts =
   Read
     { dbPath = "/tmp/rocksdb" &= help "db path",
-      logName = "log" &= help "name of log to read"
+      entrySize = 128 &= help "size of each entry (byte)",
+      readBatchSize = 1024 &= help "num of entry each read",
+      logNamePrefix = "log" &= help "name prefix of logs to read",
+      logNum = 1 &= help "num of log to read"
     }
     &= help "read"
 
@@ -84,42 +90,38 @@ main = do
     Append {..} -> do
       numRef <- newIORef (0 :: Integer)
       let dict = H.singleton appendedEntryNumKey numRef
-      printAppendSpeed dict entrySize
+      printSpeed dict appendedEntryNumKey entrySize 3
       withLogStore
-        Config
+        defaultConfig
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
-            dbWriteBufferSize = 0,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 2
+            dbStatsDumpPeriodSec = 10
           }
         (mapConcurrently_ (appendTask dict totalSize entrySize batchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
-    Read {..} ->
+    Read {..} -> do
+      numRef <- newIORef (0 :: Integer)
+      let dict = H.singleton readEntryNumKey numRef
+      printSpeed dict readEntryNumKey entrySize 3
       withLogStore
-        Config
+        defaultConfig
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
-            dbWriteBufferSize = 0,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 30
+            dbStatsDumpPeriodSec = 10
           }
-        ( do
-            lh <- open logName defaultOpenOptions
-            -- drainAll lh
-            drainBatch 1024 lh
-        )
+        (mapConcurrently_ (readTask (nBytesEntry entrySize) dict readBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
     Mix {..} -> do
       appendedNumRef <- newIORef (0 :: Integer)
       readNumRef <- newIORef (0 :: Integer)
       let dict = H.insert readEntryNumKey readNumRef $ H.singleton appendedEntryNumKey appendedNumRef
       printAppendAndReadSpeed dict writeEntrySize
       withLogStore
-        Config
+        defaultConfig
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
-            dbWriteBufferSize = 0,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 2
+            dbStatsDumpPeriodSec = 10
           }
         ( do
             mapM_ (flip open defaultOpenOptions {createIfMissing = True} . T.append logNamePrefix . T.pack . show) [1 .. logNum]
@@ -161,33 +163,26 @@ readTask expectedEntry dict batchSize logName = do
   where
     readBatch :: MonadIO m => LogHandle -> EntryID -> EntryID -> ReaderT Context m ()
     readBatch lh start end = do
-      stream <- readEntries lh (Just start) (Just end)
+      res <- readEntries lh (Just start) (Just end)
       liftIO $
-        S.mapM_
-          ( \res -> do
-              when (fst res /= expectedEntry) $ do
+        mapM_
+          ( \content ->
+              when (snd content /= expectedEntry) $ do
                 putStrLn $ "read entry error, got: " ++ show res
                 throwIO $ userError "read entry error"
           )
-          stream
-      r <- liftIO $ S.last stream
-      case r of
-        Nothing -> do
+          res
+      case res of
+        Seq.Empty -> do
           liftIO $ threadDelay 1000
           readBatch lh start end
-        Just (_, lastEntryId) -> do
-          let readNum = lastEntryId - start + 1
+        _ :|> x -> do
+          let prevEntryId = fst x
+          let readNum = prevEntryId - start + 1
           increaseBy dict readEntryNumKey $ toInteger readNum
-          let nextStart = lastEntryId + 1
+          let nextStart = prevEntryId + 1
           let nextEnd = nextStart + fromIntegral batchSize - 1
           readBatch lh nextStart nextEnd
-
--- record read speed
-drainAll :: MonadIO m => LogHandle -> ReaderT Context m ()
-drainAll lh = do
-  stream <- readEntries lh Nothing Nothing
-  -- liftIO $ S.drain stream
-  liftIO $ S.mapM_ (print . fromIntegral) $ S.intervalsOf 1 FL.length stream
 
 drainBatch :: MonadIO m => EntryID -> LogHandle -> ReaderT Context m ()
 drainBatch batchSize lh = drainBatch' 1 batchSize TimeSpec {sec = 0, nsec = 0} 0
@@ -197,8 +192,8 @@ drainBatch batchSize lh = drainBatch' 1 batchSize TimeSpec {sec = 0, nsec = 0} 0
     drainBatch' :: MonadIO m => EntryID -> EntryID -> TimeSpec -> Word64 -> ReaderT Context m ()
     drainBatch' start end remainingTime accItem = do
       startTime <- liftIO $ getTime Monotonic
-      stream <- readEntries lh (Just start) (Just end)
-      readNum <- liftIO $ S.length stream
+      res <- readEntries lh (Just start) (Just end)
+      let readNum = length res
       endTime <- liftIO $ getTime Monotonic
       let duration = endTime - startTime + remainingTime
       let total = accItem + fromIntegral readNum
@@ -275,28 +270,28 @@ periodRun initDelay interval action = do
       action
   return ()
 
-printAppendSpeed :: H.HashMap B.ByteString (IORef Integer) -> Int -> IO ()
-printAppendSpeed dict entrySize = do
-  forkIO $ do
-    printSpeed 0
+printSpeed :: H.HashMap B.ByteString (IORef Integer) -> B.ByteString -> Int -> Int -> IO ()
+printSpeed dict itemKey entrySize printInterval = do
+  forkIO $
+    printSpeed' 0
   return ()
   where
-    printSpeed num = do
+    printSpeed' num = do
       startTime <- liftIO $ getTime Monotonic
-      threadDelay 3000000
-      curNum <- increaseBy dict appendedEntryNumKey 0
+      threadDelay $ printInterval * 1000000
+      curNum <- increaseBy dict itemKey 0
       endTime <- liftIO $ getTime Monotonic
       let duration = fromInteger (toNanoSecs (diffTimeSpec startTime endTime)) / 1e9
       print $ fromInteger ((curNum - num) * toInteger entrySize) / 1024 / 1024 / duration
-      printSpeed curNum
+      printSpeed' curNum
 
 printAppendAndReadSpeed :: H.HashMap B.ByteString (IORef Integer) -> Int -> IO ()
 printAppendAndReadSpeed dict entrySize = do
-  forkIO $ do
-    printSpeed 0 0
+  forkIO $
+    printSpeed' 0 0
   return ()
   where
-    printSpeed prevAppendedNum prevReadNum = do
+    printSpeed' prevAppendedNum prevReadNum = do
       startTime <- liftIO $ getTime Monotonic
       threadDelay 3000000
       curAppendedNum <- increaseBy dict appendedEntryNumKey 0
@@ -310,4 +305,4 @@ printAppendAndReadSpeed dict entrySize = do
           ++ "read: "
           ++ show (fromInteger ((curReadNum - prevReadNum) * toInteger entrySize) / 1024 / 1024 / duration)
           ++ " MB/s"
-      printSpeed curAppendedNum curReadNum
+      printSpeed' curAppendedNum curReadNum

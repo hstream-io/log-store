@@ -15,7 +15,6 @@ module Log.Store.Base
 
     -- * Basic functions
     initialize,
-    create,
     open,
     appendEntry,
     appendEntries,
@@ -26,115 +25,168 @@ module Log.Store.Base
 
     -- * Options
     defaultOpenOptions,
+    defaultConfig,
   )
 where
 
-import Control.Exception (throwIO)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (Async, async, cancel)
+import qualified Control.Concurrent.ReadWriteLock as RWL
+import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, retry, writeTVar)
+import Control.Exception (bracket, throwIO)
+import Control.Monad (foldM, forever, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
-import Data.Bifunctor (first)
 import qualified Data.ByteString as B
-import qualified Data.ByteString.UTF8 as U
+import qualified Data.Cache.LRU as L
 import Data.Default (def)
-import Data.Function ((&))
 import qualified Data.HashMap.Strict as H
 import Data.Hashable (Hashable)
-import Data.IORef (IORef, newIORef)
-import Data.Maybe (isJust)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Maybe (fromMaybe, isJust)
+import Data.Sequence (Seq (..), (><), (|>))
+import qualified Data.Sequence as Seq
 import qualified Data.Text as T
-import Data.Vector (Vector, forM)
+import qualified Data.Vector as V
 import Data.Word (Word32, Word64)
 import qualified Database.RocksDB as R
-import GHC.Conc (TVar, atomically, newTVarIO, readTVar, writeTVar)
 import GHC.Generics (Generic)
 import Log.Store.Exception
 import Log.Store.Internal
 import Log.Store.Utils
-import Streamly (Serial)
-import qualified Streamly.Prelude as S
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
 
 -- | Config info
 data Config = Config
   { rootDbPath :: FilePath,
     dataCfWriteBufferSize :: Word64,
-    dbWriteBufferSize :: Word64,
     enableDBStatistics :: Bool,
-    dbStatsDumpPeriodSec :: Word32
+    dbStatsDumpPeriodSec :: Word32,
+    partitionInterval :: Int, -- seconds
+    partitionFilesNumLimit :: Int,
+    maxOpenDbs :: Int
   }
+
+defaultConfig :: Config
+defaultConfig =
+  Config
+    { rootDbPath = "/tmp/log-store/rocksdb",
+      dataCfWriteBufferSize = 200 * 1024 * 1024,
+      enableDBStatistics = False,
+      dbStatsDumpPeriodSec = 600,
+      partitionInterval = 60,
+      partitionFilesNumLimit = 16,
+      maxOpenDbs = -1
+    }
 
 data Context = Context
-  { dbHandle :: R.DB,
-    defaultCFHandle :: R.ColumnFamily,
-    metaCFHandle :: R.ColumnFamily,
-    dataCFHandle :: R.ColumnFamily,
+  { dbPath :: FilePath,
+    metaDbHandle :: R.DB,
+    rwLockForCurDb :: RWL.RWLock,
+    curDataDbHandleRef :: IORef R.DB,
     logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle),
-    maxLogIdRef :: IORef LogID
+    maxLogIdRef :: IORef LogID,
+    backgroundShardingTask :: Async (),
+    dbHandlesForReadCache :: TVar (L.LRU String R.DB),
+    dbHandlesForReadRcMap :: TVar (H.HashMap String Int),
+    dbHandlesForReadEvcited :: TVar (H.HashMap String R.DB)
   }
 
+shardingTask ::
+  Int ->
+  Int ->
+  FilePath ->
+  Word64 ->
+  RWL.RWLock ->
+  IORef R.DB ->
+  IO ()
+shardingTask
+  partitionInterval
+  partitionFilesNumLimit
+  dbPath
+  cfWriteBufferSize
+  rwLock
+  curDataDbHandleRef = forever $ do
+    threadDelay $ partitionInterval * 1000000
+    curDb <- RWL.withRead rwLock $ readIORef curDataDbHandleRef
+    curDataDbFilesNum <- getFilesNumInDb curDb
+    when
+      (curDataDbFilesNum >= partitionFilesNumLimit)
+      $ RWL.withWrite
+        rwLock
+        ( do
+            newDbName <- generateDataDbName
+            newDbHandle <- createDataDb dbPath newDbName cfWriteBufferSize
+            R.flush curDb def
+            R.close curDb
+            writeIORef curDataDbHandleRef newDbHandle
+        )
+
+openMetaDb :: MonadIO m => Config -> m R.DB
+openMetaDb Config {..} = do
+  liftIO $ createDirectoryIfMissing True rootDbPath
+  R.open
+    R.defaultDBOptions
+      { R.createIfMissing = True
+      }
+    (rootDbPath </> metaDbName)
+
 -- | init Context using Config
+-- 1. open (or create) db, metaCF, create a new dataCF
+-- 2. init context variables: logHandleCache, maxLogIdRef
+-- 3. start background task: shardingTask
 initialize :: MonadIO m => Config -> m Context
-initialize Config {..} =
+initialize cfg@Config {..} =
   liftIO $ do
-    (db, [defaultCF, metaCF, dataCF]) <-
-      R.openColumnFamilies
-        R.defaultDBOptions
-          { R.createIfMissing = True,
-            R.createMissingColumnFamilies = True,
-            R.dbWriteBufferSize = dbWriteBufferSize,
-            R.maxBackgroundCompactions = 1,
-            R.maxBackgroundFlushes = 1,
-            R.enableStatistics = enableDBStatistics,
-            R.statsDumpPeriodSec = dbStatsDumpPeriodSec
-          }
-        rootDbPath
-        [ R.ColumnFamilyDescriptor
-            { name = defaultCFName,
-              options = R.defaultDBOptions
-            },
-          R.ColumnFamilyDescriptor
-            { name = metaCFName,
-              options = R.defaultDBOptions
-            },
-          R.ColumnFamilyDescriptor
-            { name = dataCFName,
-              options =
-                R.defaultDBOptions
-                  { R.writeBufferSize = dataCfWriteBufferSize,
-                    R.disableAutoCompactions = True,
-                    R.level0FileNumCompactionTrigger = -1,
-                    R.level0SlowdownWritesTrigger = -1,
-                    R.level0StopWritesTrigger = -1,
-                    R.softPendingCompactionBytesLimit = 18446744073709551615,
-                    R.hardPendingCompactionBytesLimit = 18446744073709551615
-                  }
-            }
-        ]
-    cache <- newTVarIO H.empty
-    maxLogId <- getMaxLogId db metaCF
+    metaDb <- openMetaDb cfg
+
+    newDataDbName <- generateDataDbName
+    newDataDbHandle <- createDataDb rootDbPath newDataDbName dataCfWriteBufferSize
+    newDataDbHandleRef <- newIORef newDataDbHandle
+
+    newRWLock <- RWL.new
+    logHandleCache <- newTVarIO H.empty
+    maxLogId <- getMaxLogId metaDb
     logIdRef <- newIORef maxLogId
+    bgShardingTask <-
+      async $
+        shardingTask
+          partitionInterval
+          partitionFilesNumLimit
+          rootDbPath
+          dataCfWriteBufferSize
+          newRWLock
+          newDataDbHandleRef
+
+    let cacheSize = if maxOpenDbs <= 0 then Nothing else Just $ toInteger maxOpenDbs
+    dbHandlesForReadCache <- newTVarIO $ L.newLRU cacheSize
+    dbHandlesForReadRcMap <- newTVarIO H.empty
+    dbHandlesForReadEvcited <- newTVarIO H.empty
+
     return
       Context
-        { dbHandle = db,
-          defaultCFHandle = defaultCF,
-          metaCFHandle = metaCF,
-          dataCFHandle = dataCF,
-          logHandleCache = cache,
-          maxLogIdRef = logIdRef
+        { dbPath = rootDbPath,
+          metaDbHandle = metaDb,
+          rwLockForCurDb = newRWLock,
+          curDataDbHandleRef = newDataDbHandleRef,
+          logHandleCache = logHandleCache,
+          maxLogIdRef = logIdRef,
+          backgroundShardingTask = bgShardingTask,
+          dbHandlesForReadCache = dbHandlesForReadCache,
+          dbHandlesForReadRcMap = dbHandlesForReadRcMap,
+          dbHandlesForReadEvcited = dbHandlesForReadEvcited
         }
   where
-    dataCFName = "data"
-    metaCFName = "meta"
-    defaultCFName = "default"
-
-    getMaxLogId :: R.DB -> R.ColumnFamily -> IO LogID
-    getMaxLogId db cf = do
-      maxLogId <- R.getCF db def cf maxLogIdKey
+    getMaxLogId :: R.DB -> IO LogID
+    getMaxLogId db = do
+      maxLogId <- R.get db def maxLogIdKey
       case maxLogId of
         Nothing -> do
           let initLogId = 0
-          R.putCF db def cf maxLogIdKey $ encodeWord64 initLogId
+          R.put db def maxLogIdKey $ encodeWord64 initLogId
           return initLogId
         Just v -> return (decodeWord64 v)
 
@@ -177,7 +229,7 @@ instance Hashable LogHandleKey
 open :: MonadIO m => LogName -> OpenOptions -> ReaderT Context m LogHandle
 open name opts@OpenOptions {..} = do
   Context {..} <- ask
-  res <- R.getCF dbHandle def metaCFHandle (encodeText name)
+  res <- R.get metaDbHandle def (encodeText name)
   let valid = checkOpts res
   if valid
     then do
@@ -231,8 +283,8 @@ open name opts@OpenOptions {..} = do
         Just bId ->
           do
             let logId = decodeLogId bId
-            maxEntryId <- getMaxEntryId logId
-            maxEntryIdRef <- liftIO $ newIORef maxEntryId
+            res <- getMaxEntryId logId
+            maxEntryIdRef <- liftIO $ newIORef $ fromMaybe minEntryId res
             return $
               LogHandle
                 { logName = name,
@@ -248,29 +300,150 @@ open name opts@OpenOptions {..} = do
           createIfMissing
         Just _ -> True
 
-getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m EntryID
+-- getDataCfHandlesForRead :: FilePath -> IO (R.DB, [R.ColumnFamily])
+-- getDataCfHandlesForRead dbPath = do
+--   cfNames <- R.listColumnFamilies def dbPath
+--   let dataCfNames = filter (/= metaCFName) cfNames
+--   let dataCfDescriptors = map (\cfName -> R.ColumnFamilyDescriptor {name = cfName, options = def}) dataCfNames
+--   (dbForReadOnly, handles) <-
+--     R.openForReadOnlyColumnFamilies
+--       def
+--       dbPath
+--       dataCfDescriptors
+--       False
+--   return (dbForReadOnly, tail handles)
+--
+
+withDbHandleForRead ::
+  TVar (L.LRU String R.DB) ->
+  TVar (H.HashMap String R.DB) ->
+  TVar (H.HashMap String Int) ->
+  FilePath ->
+  String ->
+  (R.DB -> IO a) ->
+  IO a
+withDbHandleForRead
+  dbHandleCache
+  dbHandlesEvicted
+  dbHandleRcMap
+  dbPath
+  dbName =
+    bracket
+      ( do
+          r <-
+            atomically
+              ( do
+                  cache <- readTVar dbHandleCache
+                  let (newCache, res) = L.lookup dbName cache
+                  case res of
+                    Nothing -> do
+                      rcMap <- readTVar dbHandleRcMap
+                      let rc = H.lookupDefault 0 dbName rcMap
+                      let newRcMap = H.insert dbName (rc + 1) rcMap
+                      writeTVar dbHandleRcMap newRcMap
+                      if rc == 0
+                        then return Nothing
+                        else retry
+                    Just v -> do
+                      writeTVar dbHandleCache newCache
+                      return $ Just v
+              )
+
+          case r of
+            Nothing -> do
+              dbHandle <-
+                R.openForReadOnly
+                  def
+                  (dbPath </> dbName)
+                  False
+              insertDbHandleToCache dbHandle
+              return dbHandle
+            Just handle ->
+              return handle
+      )
+      ( \dbHandle -> do
+          shouldClose <- unRef
+          when shouldClose $
+            R.close dbHandle
+      )
+    where
+      insertDbHandleToCache :: R.DB -> IO ()
+      insertDbHandleToCache dbHandle =
+        atomically
+          ( do
+              cache <- readTVar dbHandleCache
+              let (newCache, evictedKV) = L.insertInforming dbName dbHandle cache
+              writeTVar dbHandleCache newCache
+              case evictedKV of
+                Nothing -> return ()
+                Just (k, v) -> do
+                  s <- readTVar dbHandlesEvicted
+                  writeTVar dbHandlesEvicted $ H.insert k v s
+          )
+
+      unRef :: IO Bool
+      unRef =
+        atomically $
+          do
+            rcMap <- readTVar dbHandleRcMap
+            let rc = H.lookup dbName rcMap
+            case rc of
+              Just count -> do
+                writeTVar dbHandleRcMap $ H.adjust (+ (-1)) dbName rcMap
+                if count == 0
+                  then do
+                    s <- readTVar dbHandlesEvicted
+                    case H.lookup dbName s of
+                      Nothing -> return False
+                      Just _ -> do
+                        writeTVar dbHandlesEvicted $ H.delete dbName s
+                        return True
+                  else return False
+              Nothing -> error "this should never reach"
+
+getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m (Maybe EntryID)
 getMaxEntryId logId = do
   Context {..} <- ask
-  R.withIteratorCF dbHandle def dataCFHandle findMaxEntryId
+  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath rwLockForCurDb
+  foldM
+    (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap dbPath)
+    Nothing
+    (reverse readOnlyDataDbNames)
   where
-    findMaxEntryId iterator = do
+    f cache gcMap rcMap dbPath prevRes dbName =
+      case prevRes of
+        Nothing ->
+          liftIO $
+            withDbHandleForRead
+              cache
+              gcMap
+              rcMap
+              dbPath
+              dbName
+              (\dbForRead -> R.withIterator dbForRead def findMaxEntryIdInDb)
+        Just res -> return $ Just res
+
+    findMaxEntryIdInDb :: MonadIO m => R.Iterator -> m (Maybe EntryID)
+    findMaxEntryIdInDb iterator = do
       R.seekForPrev iterator (encodeEntryKey $ EntryKey logId maxEntryId)
       isValid <- R.valid iterator
       if isValid
         then do
           entryKey <- R.key iterator
-          let (EntryKey _ entryId) = decodeEntryKey entryKey
-          return entryId
+          let (EntryKey entryLogId entryId) = decodeEntryKey entryKey
+          if entryLogId == logId
+            then return $ Just entryId
+            else return Nothing
         else do
           errStr <- R.getError iterator
           case errStr of
-            Nothing -> throwIO $ LogStoreIOException "getMaxEntryId occurs error"
-            Just str -> throwIO $ LogStoreIOException $ "getMaxEntryId error: " ++ str
+            Nothing -> return Nothing
+            Just str -> liftIO $ throwIO $ LogStoreIOException $ "getMaxEntryId error: " ++ str
 
 exists :: MonadIO m => LogName -> ReaderT Context m Bool
 exists name = do
   Context {..} <- ask
-  logId <- R.getCF dbHandle def metaCFHandle (encodeLogName name)
+  logId <- R.get metaDbHandle def (encodeLogName name)
   return $ isJust logId
 
 create :: MonadIO m => LogName -> ReaderT Context m LogID
@@ -283,17 +456,11 @@ create name = do
           LogStoreLogAlreadyExistsException $ "log " ++ T.unpack name ++ " already existed"
     else do
       Context {..} <- ask
-      R.withWriteBatch $ initLog dbHandle metaCFHandle dataCFHandle maxLogIdRef
+      initLog metaDbHandle maxLogIdRef
   where
-    initLog db metaCf dataCf maxLogIdRef batch = do
-      logId <- generateLogId db metaCf maxLogIdRef
-      R.batchPutCF batch metaCf (encodeLogName name) (encodeLogId logId)
-      R.batchPutCF
-        batch
-        dataCf
-        (encodeEntryKey $ EntryKey logId minEntryId)
-        (U.fromString "first entry")
-      R.write db def batch
+    initLog metaDb maxLogIdRef = do
+      logId <- generateLogId metaDb maxLogIdRef
+      R.put metaDb def (encodeLogName name) (encodeLogId logId)
       return logId
 
 -- | append an entry to log
@@ -301,28 +468,39 @@ appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m EntryID
 appendEntry LogHandle {..} entry = do
   Context {..} <- ask
   if writeMode openOptions
-    then do
-      entryId <- generateEntryId maxEntryIdRef
-      R.putCF
-        dbHandle
-        R.defaultWriteOptions {R.disableWAL = True}
-        dataCFHandle
-        (encodeEntryKey $ EntryKey logID entryId)
-        entry
-      return entryId
+    then
+      liftIO $
+        RWL.withRead
+          rwLockForCurDb
+          ( do
+              entryId <- generateEntryId maxEntryIdRef
+              curDataDb <- readIORef curDataDbHandleRef
+              R.put
+                curDataDb
+                R.defaultWriteOptions
+                (encodeEntryKey $ EntryKey logID entryId)
+                entry
+              return entryId
+          )
     else
       liftIO $
         throwIO $
           LogStoreUnsupportedOperationException $ "log named " ++ T.unpack logName ++ " is not writable."
 
-appendEntries :: MonadIO m => LogHandle -> Vector Entry -> ReaderT Context m (Vector EntryID)
+appendEntries :: MonadIO m => LogHandle -> V.Vector Entry -> ReaderT Context m (V.Vector EntryID)
 appendEntries LogHandle {..} entries = do
   Context {..} <- ask
-  R.withWriteBatch $ appendEntries' dbHandle dataCFHandle
+  liftIO $
+    RWL.withRead
+      rwLockForCurDb
+      ( do
+          curDataDb <- readIORef curDataDbHandleRef
+          R.withWriteBatch $ appendEntries' curDataDb
+      )
   where
-    appendEntries' db cf batch = do
+    appendEntries' db batch = do
       entryIds <-
-        forM
+        V.forM
           entries
           batchAdd
       R.write db def batch
@@ -330,32 +508,115 @@ appendEntries LogHandle {..} entries = do
       where
         batchAdd entry = do
           entryId <- generateEntryId maxEntryIdRef
-          R.batchPutCF batch cf (encodeEntryKey $ EntryKey logID entryId) entry
+          R.batchPut batch (encodeEntryKey $ EntryKey logID entryId) entry
           return entryId
+
+-- readEntries ::
+--   MonadIO m =>
+--   LogHandle ->
+--   Maybe EntryID ->
+--   Maybe EntryID ->
+--   ReaderT Context m (Serial (Entry, EntryID))
+-- readEntries LogHandle {..} firstKey lastKey = do
+--   Context {..} <- ask
+--   dataCfNames <- getDataCfNameSet dbPath
+--   streams <- mapM (readEntriesInCf resourcesForReadRef dbPath) dataCfNames
+--   return $ sconcat $ fromList streams
+--   where
+--     readEntriesInCf resRef dbPath dataCfName =
+--       liftIO $ do
+--         cfr@CFResourcesForRead {..} <- openCFReadOnly dbPath dataCfName
+--         atomicModifyIORefCAS resRef (\res -> (res ++ [cfr], res))
+--         let kvStream = R.rangeCF dbHandleForRead def cfHandleForRead start end
+--         return $
+--           kvStream
+--             & S.map (first decodeEntryKey)
+--             -- & S.filter (\(EntryKey logId _, _) -> logId == logID)
+--             & S.map (\(EntryKey _ entryId, entry) -> (entry, entryId))
+--
+--     start =
+--       case firstKey of
+--         Nothing -> Just $ encodeEntryKey $ EntryKey logID firstNormalEntryId
+--         Just k -> Just $ encodeEntryKey $ EntryKey logID k
+--     end =
+--       case lastKey of
+--         Nothing -> Just $ encodeEntryKey $ EntryKey logID maxEntryId
+--         Just k -> Just $ encodeEntryKey $ EntryKey logID k
 
 readEntries ::
   MonadIO m =>
   LogHandle ->
   Maybe EntryID ->
   Maybe EntryID ->
-  ReaderT Context m (Serial (Entry, EntryID))
+  ReaderT Context m (Seq (EntryID, Entry))
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
-  let kvStream = R.rangeCF dbHandle def dataCFHandle start end
-  return $
-    kvStream
-      & S.map (first decodeEntryKey)
-      -- & S.filter (\(EntryKey logId _, _) -> logId == logID)
-      & S.map (\(EntryKey _ entryId, entry) -> (entry, entryId))
+  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath rwLockForCurDb
+  prevRes <-
+    foldM
+      (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap logID dbPath)
+      Seq.empty
+      readOnlyDataDbNames
+  if goOn prevRes
+    then
+      liftIO $
+        RWL.withRead
+          rwLockForCurDb
+          ( do
+              curDb <- readIORef curDataDbHandleRef
+              res <- R.withIterator curDb def $ readEntriesInDb logID
+              return $ prevRes >< res
+          )
+    else return prevRes
   where
-    start =
-      case firstKey of
-        Nothing -> Just $ encodeEntryKey $ EntryKey logID firstNormalEntryId
-        Just k -> Just $ encodeEntryKey $ EntryKey logID k
-    end =
-      case lastKey of
-        Nothing -> Just $ encodeEntryKey $ EntryKey logID maxEntryId
-        Just k -> Just $ encodeEntryKey $ EntryKey logID k
+    -- f :: MonadIO m => LogID -> FilePath -> [(EntryID, Entry)] -> String -> m [(EntryID, Entry)]
+    f cache gcMap rcMap logId dbPath prevRes dataDbName =
+      if goOn prevRes
+        then liftIO $ do
+          res <-
+            withDbHandleForRead
+              cache
+              gcMap
+              rcMap
+              dbPath
+              dataDbName
+              (\dbForRead -> R.withIterator dbForRead def $ readEntriesInDb logId)
+          return $ prevRes >< res
+        else return prevRes
+
+    goOn prevRes = Seq.null prevRes || fst (lastElemInSeq prevRes) < limitEntryId
+
+    lastElemInSeq seq =
+      case seq of
+        Seq.Empty -> error "empty sequence"
+        _ :|> x -> x
+
+    readEntriesInDb :: MonadIO m => LogID -> R.Iterator -> m (Seq (EntryID, Entry))
+    readEntriesInDb logId iterator = do
+      R.seek iterator (encodeEntryKey $ EntryKey logId startEntryId)
+      loop logId iterator Seq.empty
+
+    loop :: MonadIO m => LogID -> R.Iterator -> Seq (EntryID, Entry) -> m (Seq (EntryID, Entry))
+    loop logId iterator acc = do
+      isValid <- R.valid iterator
+      if isValid
+        then do
+          entryKey <- R.key iterator
+          let (EntryKey entryLogId entryId) = decodeEntryKey entryKey
+          if entryLogId == logId && entryId <= limitEntryId
+            then do
+              entry <- R.value iterator
+              R.next iterator
+              loop logId iterator (acc |> (entryId, entry))
+            else return acc
+        else do
+          errStr <- R.getError iterator
+          case errStr of
+            Nothing -> return acc
+            Just str -> liftIO $ throwIO $ LogStoreIOException $ "readEntries error: " ++ str
+
+    startEntryId = fromMaybe minEntryId firstKey
+    limitEntryId = fromMaybe maxEntryId lastKey
 
 -- | close log
 -- |
@@ -370,10 +631,19 @@ close LogHandle {..} = return ()
 shutDown :: MonadIO m => ReaderT Context m ()
 shutDown = do
   Context {..} <- ask
-  R.destroyColumnFamily defaultCFHandle
-  R.destroyColumnFamily metaCFHandle
-  R.destroyColumnFamily dataCFHandle
-  R.close dbHandle
+  liftIO $ cancel backgroundShardingTask
+
+  readOnlyDbHandles <- liftIO $ dbHandlesWaitForFree dbHandlesForReadCache dbHandlesForReadEvcited
+  mapM_ R.close readOnlyDbHandles
+
+  R.close metaDbHandle
+  curDataDbHandle <- liftIO $ readIORef curDataDbHandleRef
+  R.close curDataDbHandle
+  where
+    dbHandlesWaitForFree cache gcMap = atomically $ do
+      c <- readTVar cache
+      g <- readTVar gcMap
+      return $ fmap snd $ L.toList c ++ H.toList g
 
 -- | function that wrap initialize and resource release.
 withLogStore :: MonadUnliftIO m => Config -> ReaderT Context m a -> m a
