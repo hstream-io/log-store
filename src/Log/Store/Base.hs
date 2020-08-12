@@ -34,7 +34,7 @@ where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel)
 import Control.Exception (throwIO)
-import Control.Monad (foldM, when, forever)
+import Control.Monad (foldM, forever, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans (lift)
@@ -101,6 +101,7 @@ shardingTask ::
   Int ->
   IORef Word64 ->
   R.DB ->
+  Word64 ->
   IORef R.ColumnFamily ->
   IORef [R.ColumnFamily] ->
   IO ()
@@ -109,6 +110,7 @@ shardingTask
   partitionSizeLimit
   curDataCfSizeRef
   db
+  cfWriteBufferSize
   curDataCfRef
   dataCfsForReadRef = forever $ do
     threadDelay $ partitionDuration * 60 * 1000000
@@ -116,8 +118,7 @@ shardingTask
     when
       (curDataCfSize >= fromIntegral partitionSizeLimit * 1024 * 1024 * 1024)
       $ do
-        newDataCfName <- generateDataCfName
-        newCfHandle <- R.createColumnFamily db def newDataCfName
+        newCfHandle <- createDataCf db cfWriteBufferSize
         atomicModifyIORefCAS dataCfsForReadRef (\cfs -> (cfs ++ [newCfHandle], cfs))
         atomicModifyIORefCAS curDataCfRef (newCfHandle,)
         atomicModifyIORefCAS curDataCfSizeRef (0,)
@@ -163,20 +164,7 @@ initialize Config {..} =
         rootDbPath
         cfDescriptors
 
-    newDataCfName <- generateDataCfName
-    newDataCfHandle <-
-      R.createColumnFamily
-        db
-        R.defaultDBOptions
-          { R.writeBufferSize = dataCfWriteBufferSize,
-            R.disableAutoCompactions = True,
-            R.level0FileNumCompactionTrigger = -1,
-            R.level0SlowdownWritesTrigger = -1,
-            R.level0StopWritesTrigger = -1,
-            R.softPendingCompactionBytesLimit = 18446744073709551615,
-            R.hardPendingCompactionBytesLimit = 18446744073709551615
-          }
-        newDataCfName
+    newDataCfHandle <- createDataCf db dataCfWriteBufferSize
 
     let defaultCf = head cfHandles
     let metaCf = head $ tail cfHandles
@@ -195,6 +183,7 @@ initialize Config {..} =
           dataCfPartitionSizeLimit
           newDataCfSizeRef
           db
+          dataCfWriteBufferSize
           newDataCfRef
           dataCfsForReadRef
     return
