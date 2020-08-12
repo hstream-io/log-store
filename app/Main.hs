@@ -139,7 +139,7 @@ appendTask ::
   LogName ->
   ReaderT Context m ()
 appendTask dict totalSize entrySize batchSize logName = do
-  liftIO $ print $ "start append task for log: " ++ show logName
+  -- liftIO $ print $ "start append task for log: " ++ show logName
   lh <- open logName defaultOpenOptions {createIfMissing = True, writeMode = True}
   if totalSize == -1
     then writeNBytesEntriesBatchForever dict lh entrySize batchSize
@@ -155,7 +155,7 @@ readTask ::
   LogName ->
   ReaderT Context m ()
 readTask expectedEntry dict batchSize logName = do
-  liftIO $ print $ "start read task for log: " ++ show logName
+  -- liftIO $ print $ "start read task for log: " ++ show logName
   lh <- open logName defaultOpenOptions
   readBatch lh 1 $ fromIntegral batchSize
   where
