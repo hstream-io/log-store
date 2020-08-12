@@ -4,8 +4,11 @@ import ByteString.StrictBuilder (builderBytes, word64BE)
 import Control.Exception (throw)
 import Data.Binary.Strict.Get (getWord64be, runGet)
 import qualified Data.ByteString as B
+import Data.Int (Int64)
 import qualified Data.Text as T
 import Data.Text.Encoding
+import Data.Time (nominalDiffTimeToSeconds)
+import Data.Time.Clock.POSIX (POSIXTime)
 import Data.Word (Word64)
 import Log.Store.Exception
 
@@ -28,3 +31,7 @@ decodeText = decodeUtf8
 
 encodeText :: T.Text -> B.ByteString
 encodeText = encodeUtf8
+
+posixTimeToSeconds :: POSIXTime -> Int64
+posixTimeToSeconds =
+  floor . nominalDiffTimeToSeconds
