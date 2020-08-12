@@ -1,21 +1,34 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Log.Store.Internal where
 
 import ByteString.StrictBuilder (builderBytes, word64BE)
-import Control.Exception (throw)
+-- import Control.Monad.Trans (lift)
+-- import Control.Exception.Lifted (bracket)
+-- import Control.Monad.Trans.Control (MonadBaseControl)
+-- import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
+
+import qualified Control.Concurrent.ReadWriteLock as RWL
+import Control.Exception (bracket, throw, throwIO)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Atomics (atomicModifyIORefCAS)
 import Data.Binary.Strict.Get (getWord64be, runGet)
-import Data.ByteString as B
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BC
 import Data.Default (def)
 import Data.IORef (IORef)
-import Data.Text as T
+import Data.List (isPrefixOf, sort)
+import qualified Data.Text as T
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Word (Word64)
 import qualified Database.RocksDB as R
 import Log.Store.Exception
 import Log.Store.Utils
+import System.Directory (listDirectory)
+import System.FilePath.Posix ((</>))
 
 type LogName = T.Text
 
@@ -46,9 +59,6 @@ minEntryId = 0
 maxEntryId :: EntryID
 maxEntryId = 0xffffffffffffffff
 
-firstNormalEntryId :: EntryID
-firstNormalEntryId = 1
-
 -- | key used when save entry to rocksdb
 data EntryKey = EntryKey LogID EntryID
   deriving (Eq, Show)
@@ -72,11 +82,11 @@ decodeEntryKey bs =
 
 -- | it is used to generate a new logId while
 -- | creating a new log.
-generateLogId :: MonadIO m => R.DB -> R.ColumnFamily -> IORef LogID -> m LogID
-generateLogId db cf logIdRef =
+generateLogId :: MonadIO m => R.DB -> IORef LogID -> m LogID
+generateLogId db logIdRef =
   liftIO $ do
     newId <- atomicModifyIORefCAS logIdRef (\curId -> (curId + 1, curId + 1))
-    R.putCF db def cf maxLogIdKey (encodeWord64 newId)
+    R.put db def maxLogIdKey (encodeWord64 newId)
     return newId
 
 -- | generate entry Id
@@ -85,3 +95,64 @@ generateEntryId :: MonadIO m => IORef EntryID -> m EntryID
 generateEntryId entryIdRef =
   liftIO $
     atomicModifyIORefCAS entryIdRef (\curId -> (curId + 1, curId + 1))
+
+metaDbName :: String
+metaDbName = "meta"
+
+dataDbNamePrefix :: String
+dataDbNamePrefix = "data-"
+
+generateDataDbName :: MonadIO m => m String
+generateDataDbName = liftIO $ do
+  posixTime <- getPOSIXTime
+  return $ dataDbNamePrefix ++ show (posixTimeToSeconds posixTime)
+
+createDataDb :: MonadIO m => FilePath -> String -> Word64 -> m R.DB
+createDataDb dbPath dbName cfWriteBufferSize =
+  R.open
+    R.defaultDBOptions
+      { R.createIfMissing = True,
+        R.writeBufferSize = cfWriteBufferSize,
+        R.disableAutoCompactions = True,
+        R.level0FileNumCompactionTrigger = -1,
+        R.level0SlowdownWritesTrigger = -1,
+        R.level0StopWritesTrigger = -1,
+        R.softPendingCompactionBytesLimit = 18446744073709551615,
+        R.hardPendingCompactionBytesLimit = 18446744073709551615
+      }
+    (dbPath </> dbName)
+
+getFilesNumInDb :: MonadIO m => R.DB -> m Int
+getFilesNumInDb db = liftIO $ do
+  res <- R.getPropertyValue db "rocksdb.num-files-at-level0"
+  case res of
+    Nothing -> throwIO $ LogStoreIOException "getFilesNumInDb error"
+    Just s -> do
+      let parseRes = BC.readInt s
+      case parseRes of
+        Nothing -> throwIO $ LogStoreDecodeException "decode property value error"
+        Just (num, leftStr) ->
+          if B.null leftStr
+            then return num
+            else throwIO $ LogStoreDecodeException "decode property value error"
+
+withDbReadOnly :: FilePath -> (R.DB -> IO a) -> IO a
+withDbReadOnly dbPath =
+  bracket
+    ( R.openForReadOnly
+        def
+        dbPath
+        False
+    )
+    R.close
+
+
+getReadOnlyDataDbNames :: MonadIO m => FilePath -> RWL.RWLock -> m [FilePath]
+getReadOnlyDataDbNames dbPath rwLock =
+  liftIO $
+    RWL.withRead
+      rwLock
+      ( do
+          res <- listDirectory dbPath
+          return $ init $ sort $ filter (isPrefixOf dataDbNamePrefix) res
+      )

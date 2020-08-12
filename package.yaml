@@ -31,13 +31,20 @@ dependencies:
 - transformers
 - mtl
 - rocksdb-haskell-bindings
-- streamly
 - vector
 - utf8-string
 - text
 - unordered-containers
 - hashable
 - atomic-primops
+- async
+- time
+- concurrent-extra
+- lifted-base 
+- monad-control 
+- lrucache
+- stm
+- containers
 
 library:
   source-dirs: src
