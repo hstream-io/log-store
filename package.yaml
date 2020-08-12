@@ -86,6 +86,7 @@ executables:
       - -rtsopts
       - -with-rtsopts=-N
       - -W
+      - -O2
     dependencies:
       - log-store
       - cmdargs
