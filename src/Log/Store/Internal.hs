@@ -101,9 +101,8 @@ generateDataCfName = liftIO $ do
   posixTime <- getPOSIXTime
   return $ dataCFNamePrefix ++ show (posixTimeToSeconds posixTime)
 
-createDataCf :: MonadIO m => R.DB -> Word64 -> m R.ColumnFamily
-createDataCf db cfWriteBufferSize = do
-  newDataCfName <- generateDataCfName
+createDataCf :: MonadIO m => R.DB -> String -> Word64 -> m R.ColumnFamily
+createDataCf db cfName cfWriteBufferSize = do
   R.createColumnFamily
     db
     R.defaultDBOptions
@@ -115,4 +114,24 @@ createDataCf db cfWriteBufferSize = do
         R.softPendingCompactionBytesLimit = 18446744073709551615,
         R.hardPendingCompactionBytesLimit = 18446744073709551615
       }
-    newDataCfName
+    cfName
+
+openReadOnlyCf :: MonadIO m => FilePath -> String -> m (R.DB, R.ColumnFamily)
+openReadOnlyCf dbPath cfName = do
+  (dbForRead, cfs) <-
+    R.openForReadOnlyColumnFamilies
+      def
+      dbPath
+      [ R.ColumnFamilyDescriptor {R.name = defaultCFName, R.options = def},
+        R.ColumnFamilyDescriptor {R.name = cfName, R.options = def}
+      ]
+      False
+  R.destroyColumnFamily $ Prelude.head cfs
+  return (dbForRead, Prelude.head $ Prelude.tail cfs)
+
+getCfSize :: MonadIO m => R.DB -> R.ColumnFamily -> m Word64
+getCfSize db cf = do
+  let startKey = encodeEntryKey $ EntryKey 0 0
+  let limitKey = encodeEntryKey $ EntryKey 0xffffffffffffffff 0xffffffffffffffff
+  res <- R.approximateSizesCf db cf [R.KeyRange {R.startKey = startKey, R.limitKey = limitKey}]
+  return $ Prelude.head res

@@ -33,6 +33,7 @@ where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel)
+import qualified Control.Concurrent.ReadWriteVar as RWV
 import Control.Exception (throwIO)
 import Control.Monad (foldM, forever, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -47,7 +48,7 @@ import Data.Default (def)
 import Data.Function ((&))
 import qualified Data.HashMap.Strict as H
 import Data.Hashable (Hashable)
-import Data.IORef (IORef, newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef, newIORef)
 import Data.List.NonEmpty (fromList)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
@@ -80,7 +81,7 @@ defaultConfig =
       enableDBStatistics = False,
       dbStatsDumpPeriodSec = 600,
       dataCfPartitionDuration = 15, -- minutes
-      dataCfPartitionSizeLimit = 6 -- GB
+      dataCfPartitionSizeLimit = 1 -- GB
     }
 
 data Context = Context
@@ -88,8 +89,7 @@ data Context = Context
     dbHandle :: R.DB,
     defaultCFHandle :: R.ColumnFamily,
     metaCFHandle :: R.ColumnFamily,
-    curDataCFHandleRef :: IORef R.ColumnFamily,
-    curDataCFSizeRef :: IORef Word64,
+    curDataCFHandleRef :: RWV.RWVar R.ColumnFamily,
     dataCfHandlesForReadRef :: IORef [R.ColumnFamily],
     logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle),
     maxLogIdRef :: IORef LogID,
@@ -99,29 +99,28 @@ data Context = Context
 shardingTask ::
   Int ->
   Int ->
-  IORef Word64 ->
   R.DB ->
   Word64 ->
-  IORef R.ColumnFamily ->
+  RWV.RWVar R.ColumnFamily ->
   IORef [R.ColumnFamily] ->
   IO ()
 shardingTask
   partitionDuration
   partitionSizeLimit
-  curDataCfSizeRef
   db
   cfWriteBufferSize
   curDataCfRef
   dataCfsForReadRef = forever $ do
     threadDelay $ partitionDuration * 60 * 1000000
-    curDataCfSize <- readIORef curDataCfSizeRef
+    curCf <- RWV.with curDataCfRef return
+    curDataCfSize <- getCfSize db curCf
     when
       (curDataCfSize >= fromIntegral partitionSizeLimit * 1024 * 1024 * 1024)
       $ do
-        newCfHandle <- createDataCf db cfWriteBufferSize
+        newCfName <- generateDataCfName
+        newCfHandle <- createDataCf db newCfName cfWriteBufferSize
+        RWV.modify_ curDataCfRef (\curCf -> R.flushCF db def curCf >> return newCfHandle)
         atomicModifyIORefCAS dataCfsForReadRef (\cfs -> (cfs ++ [newCfHandle], cfs))
-        atomicModifyIORefCAS curDataCfRef (newCfHandle,)
-        atomicModifyIORefCAS curDataCfSizeRef (0,)
         return ()
 
 -- | init Context using Config
@@ -131,6 +130,7 @@ shardingTask
 initialize :: MonadIO m => Config -> m Context
 initialize Config {..} =
   liftIO $ do
+    -- ensure db and metaCF exists
     tempDbResource <-
       R.openColumnFamilies
         R.defaultDBOptions
@@ -149,14 +149,13 @@ initialize Config {..} =
         ]
     releaseDbResource tempDbResource
 
+    -- open already exited CFs, metaCF for read && write, dataCFs only for read
     cfNames <- R.listColumnFamilies def rootDbPath
     let cfDescriptors = map (\cfName -> R.ColumnFamilyDescriptor {name = cfName, options = def}) cfNames
     (db, cfHandles) <-
       R.openColumnFamilies
         R.defaultDBOptions
-          { R.createIfMissing = True,
-            R.createMissingColumnFamilies = True,
-            R.maxBackgroundCompactions = 1,
+          { R.maxBackgroundCompactions = 1,
             R.maxBackgroundFlushes = 1,
             R.enableStatistics = enableDBStatistics,
             R.statsDumpPeriodSec = dbStatsDumpPeriodSec
@@ -164,7 +163,8 @@ initialize Config {..} =
         rootDbPath
         cfDescriptors
 
-    newDataCfHandle <- createDataCf db dataCfWriteBufferSize
+    newDataCfName <- generateDataCfName
+    newDataCfHandle <- createDataCf db newDataCfName dataCfWriteBufferSize
 
     let defaultCf = head cfHandles
     let metaCf = head $ tail cfHandles
@@ -173,15 +173,13 @@ initialize Config {..} =
     cache <- newTVarIO H.empty
     maxLogId <- getMaxLogId db metaCf
     logIdRef <- newIORef maxLogId
-    newDataCfRef <- newIORef newDataCfHandle
-    newDataCfSizeRef <- newIORef 0
+    newDataCfRef <- RWV.new newDataCfHandle
     dataCfsForReadRef <- newIORef dataCfsForRead
     bgShardingTask <-
       async $
         shardingTask
           dataCfPartitionDuration
           dataCfPartitionSizeLimit
-          newDataCfSizeRef
           db
           dataCfWriteBufferSize
           newDataCfRef
@@ -193,7 +191,6 @@ initialize Config {..} =
           defaultCFHandle = defaultCf,
           metaCFHandle = metaCf,
           curDataCFHandleRef = newDataCfRef,
-          curDataCFSizeRef = newDataCfSizeRef,
           dataCfHandlesForReadRef = dataCfsForReadRef,
           logHandleCache = cache,
           maxLogIdRef = logIdRef,
@@ -323,7 +320,7 @@ open name opts@OpenOptions {..} = do
 getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m EntryID
 getMaxEntryId logId = do
   Context {..} <- ask
-  dataCfs <- liftIO $ readIORef dataCfHandlesForReadRef
+  dataCfs <- liftIO $ atomicModifyIORefCAS dataCfHandlesForReadRef (\cfs -> (cfs, cfs))
   res <- foldM (f dbHandle) Nothing (reverse dataCfs)
   case res of
     Nothing -> liftIO $ throwIO $ LogStoreIOException $ "getMaxEntryId found nothing"
@@ -383,7 +380,7 @@ create name = do
           LogStoreLogAlreadyExistsException $ "log " ++ T.unpack name ++ " already existed"
     else do
       Context {..} <- ask
-      curDataCf <- liftIO $ readIORef curDataCFHandleRef
+      curDataCf <- liftIO $ RWV.with curDataCFHandleRef return
       R.withWriteBatch $ initLog dbHandle metaCFHandle curDataCf maxLogIdRef
   where
     initLog db metaCf dataCf maxLogIdRef batch = do
@@ -404,14 +401,13 @@ appendEntry LogHandle {..} entry = do
   if writeMode openOptions
     then do
       entryId <- generateEntryId maxEntryIdRef
-      curDataCf <- liftIO $ readIORef curDataCFHandleRef
+      curDataCf <- liftIO $ RWV.with curDataCFHandleRef return
       R.putCF
         dbHandle
         R.defaultWriteOptions
         curDataCf
         (encodeEntryKey $ EntryKey logID entryId)
         entry
-      liftIO $ atomicModifyIORefCAS curDataCFSizeRef (\curSize -> (curSize + fromIntegral (B.length entry), curSize))
       return entryId
     else
       liftIO $
@@ -421,14 +417,9 @@ appendEntry LogHandle {..} entry = do
 appendEntries :: MonadIO m => LogHandle -> V.Vector Entry -> ReaderT Context m (V.Vector EntryID)
 appendEntries LogHandle {..} entries = do
   Context {..} <- ask
-  curDataCf <- liftIO $ readIORef curDataCFHandleRef
-  let totalSize = V.foldl' f 0 entries
-  res <- R.withWriteBatch $ appendEntries' dbHandle curDataCf
-  liftIO $ atomicModifyIORefCAS curDataCFSizeRef (\curSize -> (curSize + fromIntegral totalSize, curSize))
-  return res
+  curDataCf <- liftIO $ RWV.with curDataCFHandleRef return
+  R.withWriteBatch $ appendEntries' dbHandle curDataCf
   where
-    f acc cur = acc + B.length cur
-
     appendEntries' db cf batch = do
       entryIds <-
         V.forM
@@ -450,7 +441,7 @@ readEntries ::
   ReaderT Context m (Serial (Entry, EntryID))
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
-  dataCfs <- liftIO $ readIORef dataCfHandlesForReadRef
+  dataCfs <- liftIO $ atomicModifyIORefCAS dataCfHandlesForReadRef (\cfs -> (cfs, cfs))
   streams <- mapM (readEntriesInCf dbHandle) dataCfs
   return $ sconcat $ fromList streams
   where
@@ -490,9 +481,11 @@ shutDown :: MonadIO m => ReaderT Context m ()
 shutDown = do
   Context {..} <- ask
   liftIO $ cancel backgroundShardingTask
-  dataCfs <- liftIO $ readIORef dataCfHandlesForReadRef
   R.destroyColumnFamily defaultCFHandle
   R.destroyColumnFamily metaCFHandle
+  -- curDataCf <- liftIO $ RWV.with curDataCFHandleRef return
+  -- R.destroyColumnFamily curDataCf
+  dataCfs <- liftIO $ atomicModifyIORefCAS dataCfHandlesForReadRef (\cfs -> (cfs, cfs))
   mapM_ R.destroyColumnFamily dataCfs
   R.close dbHandle
 

@@ -40,6 +40,7 @@ dependencies:
 - atomic-primops
 - async
 - time
+- concurrent-extra
 
 library:
   source-dirs: src
