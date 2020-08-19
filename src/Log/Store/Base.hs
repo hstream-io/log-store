@@ -80,7 +80,7 @@ defaultConfig =
       dataCfWriteBufferSize = 200 * 1024 * 1024,
       enableDBStatistics = False,
       dbStatsDumpPeriodSec = 600,
-      dataCfPartitionDuration = 15, -- minutes
+      dataCfPartitionDuration = 2, -- minutes
       dataCfPartitionSizeLimit = 1 -- GB
     }
 
