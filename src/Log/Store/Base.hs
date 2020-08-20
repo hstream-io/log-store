@@ -1,7 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
 
 module Log.Store.Base
   ( -- * Exported Types
@@ -48,7 +47,7 @@ import Data.Default (def)
 import Data.Function ((&))
 import qualified Data.HashMap.Strict as H
 import Data.Hashable (Hashable)
-import Data.IORef (IORef, modifyIORef, newIORef)
+import Data.IORef (IORef, newIORef)
 import Data.List.NonEmpty (fromList)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
@@ -323,10 +322,10 @@ getMaxEntryId logId = do
   dataCfs <- liftIO $ atomicModifyIORefCAS dataCfHandlesForReadRef (\cfs -> (cfs, cfs))
   res <- foldM (f dbHandle) Nothing (reverse dataCfs)
   case res of
-    Nothing -> liftIO $ throwIO $ LogStoreIOException $ "getMaxEntryId found nothing"
+    Nothing -> liftIO $ throwIO $ LogStoreIOException "getMaxEntryId found nothing"
     Just r -> return r
   where
-    f dbHandleForRead prevRes curCf = do
+    f dbHandleForRead prevRes curCf = 
       case prevRes of
         Nothing -> R.withIteratorCF dbHandleForRead def curCf findMaxEntryIdInCf
         Just res -> return $ Just res

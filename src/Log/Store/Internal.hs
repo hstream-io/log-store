@@ -102,7 +102,7 @@ generateDataCfName = liftIO $ do
   return $ dataCFNamePrefix ++ show (posixTimeToSeconds posixTime)
 
 createDataCf :: MonadIO m => R.DB -> String -> Word64 -> m R.ColumnFamily
-createDataCf db cfName cfWriteBufferSize = do
+createDataCf db cfName cfWriteBufferSize =
   R.createColumnFamily
     db
     R.defaultDBOptions
@@ -112,7 +112,11 @@ createDataCf db cfName cfWriteBufferSize = do
         R.level0SlowdownWritesTrigger = -1,
         R.level0StopWritesTrigger = -1,
         R.softPendingCompactionBytesLimit = 18446744073709551615,
-        R.hardPendingCompactionBytesLimit = 18446744073709551615
+        R.hardPendingCompactionBytesLimit = 18446744073709551615,
+        R.blockBasedTableOptions =
+          R.defaultBlockBasedOptions
+            { R.cacheIndexAndFilterBlocks = True 
+            }
       }
     cfName
 
