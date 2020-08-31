@@ -37,7 +37,8 @@ data Options
         entrySize :: Int,
         readBatchSize :: Int,
         logNamePrefix :: T.Text,
-        logNum :: Int
+        logNum :: Int,
+        maxAllowedOpenDbs :: Int
       }
   | Mix
       { dbPath :: FilePath,
@@ -46,7 +47,8 @@ data Options
         writeBatchSize :: Int,
         writeEntrySize :: Int,
         readBatchSize :: Int,
-        logNum :: Int
+        logNum :: Int,
+        maxAllowedOpenDbs :: Int
       }
   deriving (Show, Data, Typeable)
 
@@ -67,7 +69,8 @@ readOpts =
       entrySize = 128 &= help "size of each entry (byte)",
       readBatchSize = 1024 &= help "num of entry each read",
       logNamePrefix = "log" &= help "name prefix of logs to read",
-      logNum = 1 &= help "num of log to read"
+      logNum = 1 &= help "num of log to read",
+      maxAllowedOpenDbs = 1 &= help "max num of allowed open Dbs"
     }
     &= help "read"
 
@@ -79,7 +82,8 @@ mixOpts =
       readBatchSize = 1024 &= help "num of entry each read",
       dbPath = "/tmp/rocksdb" &= help "which to store data",
       logNamePrefix = "log" &= help "name prefix of logs to write",
-      logNum = 1 &= help "num of log to write"
+      logNum = 1 &= help "num of log to write",
+      maxAllowedOpenDbs = 1 &= help "max num of allowed open Dbs while reading"
     }
     &= help "mix"
 
@@ -106,9 +110,9 @@ main = do
       withLogStore
         defaultConfig
           { rootDbPath = dbPath,
-            dataCfWriteBufferSize = 200 * 1024 * 1024,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 10
+            dbStatsDumpPeriodSec = 10,
+            maxOpenDbs = maxAllowedOpenDbs
           }
         (mapConcurrently_ (readTask (nBytesEntry entrySize) dict readBatchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
     Mix {..} -> do
@@ -121,7 +125,8 @@ main = do
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 10
+            dbStatsDumpPeriodSec = 10,
+            maxOpenDbs = maxAllowedOpenDbs
           }
         ( do
             mapM_ (flip open defaultOpenOptions {createIfMissing = True} . T.append logNamePrefix . T.pack . show) [1 .. logNum]
