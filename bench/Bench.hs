@@ -8,8 +8,7 @@ import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 import Criterion.Main
 import qualified Data.ByteString as B
 import qualified Data.Vector as V
-import Log.Store.Base
-import Streamly.Prelude as S
+import  Log.Store.Base
 import System.IO.Temp (createTempDirectory)
 
 main =
@@ -109,8 +108,8 @@ writeAndRead entrySize batchSize batchNum =
         "log"
         defaultOpenOptions {writeMode = True, createIfMissing = True}
     write' lh 1
-    s <- readEntries lh Nothing Nothing
-    liftIO $ S.drain s
+    readEntries lh Nothing Nothing
+    return ()
   where
     write' lh x =
       if x == batchNum
@@ -128,7 +127,7 @@ withLogStoreBench r =
           createTempDirectory Nothing "log-store-bench"
         (_, ctx) <-
           allocate
-            (initialize $ Config {rootDbPath = path})
+            (initialize Log.Store.Base.defaultConfig)
             (runReaderT shutDown)
         lift $ runReaderT r ctx
     )
