@@ -134,10 +134,10 @@ matrix:
     #- env: BUILD=stack RESOLVER=nightly
 
     - env: BUILD=stack RESOLVER=lts-16 GHCVER=8.8
-      addons: {apt: {packages: [cabal-install-3.2,librocksdb-dev], sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-3.2], sources: [hvr-ghc]}}
 
     - env: BUILD=stack RESOLVER=lts-15 GHCVER=8.8
-      addons: {apt: {packages: [cabal-install-3.2,librocksdb-dev], sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-3.2], sources: [hvr-ghc]}}
 
     #- env: BUILD=stack RESOLVER=lts-14 GHCVER=8.6
     #  addons: {apt: {packages: [cabal-install-3.2,librocksdb-dev], sources: [hvr-ghc]}}
@@ -206,6 +206,10 @@ cache:
     - $HOME/.ghcjs
     - $HOME/.local
     - $HOME/.stack
+before_install:
+  - sudo add-apt-repository -y ppa:exonum/rocksdb
+  - sudo apt-get -q update
+  - sudo apt-get -y install librocksdb-dev
 install: true
 
 script:
