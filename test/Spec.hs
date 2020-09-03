@@ -12,6 +12,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.UTF8 as U
 import qualified Data.Foldable as F
+import qualified Data.Sequence as Seq 
 import Data.Function ((&))
 import Data.List (sort)
 import qualified Data.Vector as V
@@ -30,6 +31,7 @@ import Log.Store.Base
     initialize,
     open,
     readEntries,
+    readEntriesByCount,
     readMode,
     shutDown,
     withLogStore,
@@ -74,8 +76,9 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               appendEntry logHandle "entry"
+              return "success"
           )
-          `shouldReturn` 1
+          `shouldReturn` "success"
       it "put some entries to a log" $
         withLogStoreTest
           ( do
@@ -83,12 +86,12 @@ main = hspec $
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              entryId1 <- appendEntry logHandle "entry1"
-              entryId2 <- appendEntry logHandle "entry2"
-              entryId3 <- appendEntry logHandle "entry3"
-              return [entryId1, entryId2, entryId3]
+              appendEntry logHandle "entry1"
+              appendEntry logHandle "entry2"
+              appendEntry logHandle "entry3"
+              return "success"
           )
-          `shouldReturn` [1, 2, 3]
+          `shouldReturn` "success"
       it "put some entries to multiple logs" $
         withLogStoreTest
           ( do
@@ -96,30 +99,29 @@ main = hspec $
                 open
                   "log1"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              log1EntryId1 <- appendEntry lh1 "log1-entry1"
-              log1EntryId2 <- appendEntry lh1 "log1-entry2"
-              log1EntryId3 <- appendEntry lh1 "log1-entry3"
+              appendEntry lh1 "log1-entry1"
+              appendEntry lh1 "log1-entry2"
+              appendEntry lh1 "log1-entry3"
+
               lh2 <-
                 open
                   "log2"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              log2EntryId1 <- appendEntry lh2 "log2-entry1"
-              log2EntryId2 <- appendEntry lh2 "log2-entry2"
-              log2EntryId3 <- appendEntry lh2 "log2-entry3"
+              appendEntry lh2 "log2-entry1"
+              appendEntry lh2 "log2-entry2"
+              appendEntry lh2 "log2-entry3"
+
               lh3 <-
                 open
                   "log3"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              log3EntryId1 <- appendEntry lh3 "log3-entry1"
-              log3EntryId2 <- appendEntry lh3 "log3-entry2"
-              log3EntryId3 <- appendEntry lh3 "log3-entry3"
-              return
-                [ [log1EntryId1, log1EntryId2, log1EntryId3],
-                  [log2EntryId1, log2EntryId2, log2EntryId3],
-                  [log3EntryId1, log3EntryId2, log3EntryId3]
-                ]
+              appendEntry lh3 "log3-entry1"
+              appendEntry lh3 "log3-entry2"
+              appendEntry lh3 "log3-entry3"
+
+              return "success"
           )
-          `shouldReturn` [[1, 2, 3], [1, 2, 3], [1, 2, 3]]
+          `shouldReturn` "success"
       it "put an entry to a log and read it" $
         withLogStoreTest
           ( do
@@ -128,9 +130,10 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               entryId <- appendEntry logHandle "entry"
-              F.toList <$> readEntries logHandle Nothing Nothing
+              r <- readEntries logHandle Nothing Nothing
+              return $ fmap snd (F.toList r)
           )
-          `shouldReturn` [(1, "entry")]
+          `shouldReturn` ["entry"]
       it "put some entries to a log and read them" $
         withLogStoreTest
           ( do
@@ -138,12 +141,13 @@ main = hspec $
                 open
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              entryId1 <- appendEntry logHandle "entry1"
-              entryId2 <- appendEntry logHandle "entry2"
-              entryId3 <- appendEntry logHandle "entry3"
-              F.toList <$> readEntries logHandle Nothing Nothing
+              appendEntry logHandle "entry1"
+              appendEntry logHandle "entry2"
+              appendEntry logHandle "entry3"
+              r <- readEntries logHandle Nothing Nothing
+              return $ fmap snd (F.toList r)
           )
-          `shouldReturn` [(1, "entry1"), (2, "entry2"), (3, "entry3")]
+          `shouldReturn` ["entry1", "entry2", "entry3"]
       it "put some entries to multiple logs and read them (1)" $
         withLogStoreTest
           ( do
@@ -151,31 +155,34 @@ main = hspec $
                 open
                   "log1"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              log1EntryId1 <- appendEntry lh1 "log1-entry1"
-              log1EntryId2 <- appendEntry lh1 "log1-entry2"
-              log1EntryId3 <- appendEntry lh1 "log1-entry3"
+              appendEntry lh1 "log1-entry1"
+              appendEntry lh1 "log1-entry2"
+              appendEntry lh1 "log1-entry3"
+
               lh2 <-
                 open
                   "log2"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              log2EntryId1 <- appendEntry lh2 "log2-entry1"
-              log2EntryId2 <- appendEntry lh2 "log2-entry2"
-              log2EntryId3 <- appendEntry lh2 "log2-entry3"
+              appendEntry lh2 "log2-entry1"
+              appendEntry lh2 "log2-entry2"
+              appendEntry lh2 "log2-entry3"
+
               lh3 <-
                 open
                   "log3"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
-              log3EntryId1 <- appendEntry lh3 "log3-entry1"
-              log3EntryId2 <- appendEntry lh3 "log3-entry2"
-              log3EntryId3 <- appendEntry lh3 "log3-entry3"
-              r1 <- readEntries lh1 Nothing Nothing
-              r2 <- readEntries lh2 Nothing Nothing
-              r3 <- readEntries lh3 Nothing Nothing
-              return $ fmap F.toList [r1, r2, r3]
+              appendEntry lh3 "log3-entry1"
+              appendEntry lh3 "log3-entry2"
+              appendEntry lh3 "log3-entry3"
+
+              r1 <- F.toList <$> readEntries lh1 Nothing Nothing
+              r2 <- F.toList <$> readEntries lh2 Nothing Nothing
+              r3 <- F.toList <$> readEntries lh3 Nothing Nothing
+              return [fmap snd r1, fmap snd r2, fmap snd r3]
           )
-          `shouldReturn` [ [(1, "log1-entry1"), (2, "log1-entry2"), (3, "log1-entry3")],
-                           [(1, "log2-entry1"), (2, "log2-entry2"), (3, "log2-entry3")],
-                           [(1, "log3-entry1"), (2, "log3-entry2"), (3, "log3-entry3")]
+          `shouldReturn` [ ["log1-entry1", "log1-entry2", "log1-entry3"],
+                           ["log2-entry1", "log2-entry2", "log2-entry3"],
+                           ["log3-entry1", "log3-entry2", "log3-entry3"]
                          ]
       it "put some entries to multiple logs and read them (2)" $
         withLogStoreTest
@@ -202,9 +209,10 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               appendEntries logHandle (V.replicate 3 (U.fromString "entry"))
-              F.toList <$> readEntries logHandle Nothing Nothing
+              r <- readEntries logHandle Nothing Nothing
+              return $ fmap snd (F.toList r)
           )
-          `shouldReturn` [(1, "entry"), (2, "entry"), (3, "entry")]
+          `shouldReturn` generateReadResult 3 ""
       it "append entry repeatly to a log and read them" $
         withLogStoreTest
           ( do
@@ -214,9 +222,46 @@ main = hspec $
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               appendEntryRepeat 300 logHandle ""
               res <- F.toList <$> readEntries logHandle Nothing Nothing
-              return $ map fst res
+              return $ map snd res
           )
-          `shouldReturn` [1 .. 300]
+          `shouldReturn` generateReadResult 300 "" 
+      it "readEntriesByCount (1)" $
+        withLogStoreTest
+          ( do
+              logHandle <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              appendEntryRepeat 300 logHandle ""
+              res <- F.toList <$> readEntriesByCount logHandle Nothing 10 
+              return $ map snd res
+          )
+          `shouldReturn` generateReadResult 10 "" 
+      it "readEntriesByCount (2)" $
+        withLogStoreTest
+          ( do
+              logHandle <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              appendEntryRepeat 300 logHandle ""
+              res <- F.toList <$> readEntriesByCount logHandle Nothing 500 
+              return $ map snd res
+          )
+          `shouldReturn` generateReadResult 300 "" 
+      it "readEntriesByCount (3)" $
+        withLogStoreTest
+          ( do
+              logHandle <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              appendEntryRepeat 300 logHandle ""
+              r1 <- readEntriesByCount logHandle Nothing 10 
+              r2 <- readEntriesByCount logHandle (Just $ fst $ lastElemInSeq r1) 50 
+              return $ map snd $ F.toList r2 
+          )
+          `shouldReturn` generateReadResult 50 "" 
       it "multiple open" $
         withLogStoreTest
           ( do
@@ -235,9 +280,9 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               res <- F.toList <$> readEntries lh3 Nothing Nothing
-              return $ map fst res
+              return $ map snd res
           )
-          `shouldReturn` [1 .. 600]
+          `shouldReturn` generateReadResult 600 "" 
       it "sequencial open the same log should return the same logHandle" $
         withLogStoreTest
           ( do
@@ -322,7 +367,7 @@ main = hspec $
               r1 <- wait c1
               r2 <- wait c2
               r3 <- wait c3
-              return [r1, r2, r3]
+              return [fmap snd r1, fmap snd r2, fmap snd r3]
           )
           `shouldReturn` [generateReadResult 3 "l1", generateReadResult 3 "l2", generateReadResult 3 "l3"]
       it "concurrent append to the same log" $
@@ -365,9 +410,9 @@ main = hspec $
               wait c2
               lh <- wait c3
               res <- F.toList <$> readEntries lh Nothing Nothing
-              return $ map fst res
+              return $ map snd res
           )
-          `shouldReturn` [1 .. 900]
+          `shouldReturn` generateReadResult 900 "" 
 
 -- | append n entries to a log
 appendEntryRepeat :: MonadIO m => Int -> LogHandle -> String -> ReaderT Context m EntryID
@@ -400,8 +445,14 @@ withLogStoreTest r =
         lift $ runReaderT r ctx
     )
 
-generateReadResult :: Word64 -> String -> [(EntryID, Entry)]
-generateReadResult num entryPrefix = map (,C.pack $ entryPrefix ++ testEntryContent) [1 .. num]
+generateReadResult :: Int -> String -> [Entry]
+generateReadResult num entryPrefix = replicate num (C.pack $ entryPrefix ++ testEntryContent)
 
 testEntryContent :: String
 testEntryContent = "entry"
+
+lastElemInSeq :: Seq.Seq a -> a 
+lastElemInSeq seq =
+  case seq of
+    Seq.Empty -> error "empty sequence"
+    _ Seq.:|> x -> x
