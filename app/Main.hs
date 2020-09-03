@@ -18,9 +18,8 @@ import Data.Sequence (Seq (..))
 import qualified Data.Sequence as Seq
 import qualified Data.Text as T
 import qualified Data.Vector as V
-import Data.Word (Word64)
 import Log.Store.Base
-import System.Clock (Clock (Monotonic), TimeSpec (..), diffTimeSpec, getTime, toNanoSecs)
+import System.Clock (Clock (Monotonic), diffTimeSpec, getTime, toNanoSecs)
 import System.Console.CmdArgs.Implicit
 
 data Options
@@ -164,11 +163,11 @@ readTask ::
 readTask expectedEntry dict batchSize logName = do
   -- liftIO $ print $ "start read task for log: " ++ show logName
   lh <- open logName defaultOpenOptions
-  readBatch lh 1 $ fromIntegral batchSize
+  readBatch lh Nothing $ fromIntegral batchSize
   where
-    readBatch :: MonadIO m => LogHandle -> EntryID -> EntryID -> ReaderT Context m ()
-    readBatch lh start end = do
-      res <- readEntries lh (Just start) (Just end)
+    readBatch :: MonadIO m => LogHandle -> Maybe EntryID -> Int -> ReaderT Context m ()
+    readBatch lh start count = do
+      res <- readEntriesByCount lh start count
       liftIO $
         mapM_
           ( \content ->
@@ -180,33 +179,12 @@ readTask expectedEntry dict batchSize logName = do
       case res of
         Seq.Empty -> do
           liftIO $ threadDelay 1000
-          readBatch lh start end
+          readBatch lh start count
         _ :|> x -> do
           let prevEntryId = fst x
-          let readNum = prevEntryId - start + 1
+          let readNum = Seq.length res
           increaseBy dict readEntryNumKey $ toInteger readNum
-          let nextStart = prevEntryId + 1
-          let nextEnd = nextStart + fromIntegral batchSize - 1
-          readBatch lh nextStart nextEnd
-
-drainBatch :: MonadIO m => EntryID -> LogHandle -> ReaderT Context m ()
-drainBatch batchSize lh = drainBatch' 1 batchSize TimeSpec {sec = 0, nsec = 0} 0
-  where
-    sampleDuration = TimeSpec {sec = 1, nsec = 0}
-
-    drainBatch' :: MonadIO m => EntryID -> EntryID -> TimeSpec -> Word64 -> ReaderT Context m ()
-    drainBatch' start end remainingTime accItem = do
-      startTime <- liftIO $ getTime Monotonic
-      res <- readEntries lh (Just start) (Just end)
-      let readNum = length res
-      endTime <- liftIO $ getTime Monotonic
-      let duration = endTime - startTime + remainingTime
-      let total = accItem + fromIntegral readNum
-      if duration >= sampleDuration
-        then do
-          liftIO $ print total
-          drainBatch' (end + 1) (end + batchSize) 0 0
-        else drainBatch' (end + 1) (end + batchSize) duration total
+          readBatch lh (Just prevEntryId) count
 
 nBytesEntry :: Int -> B.ByteString
 nBytesEntry n = B.replicate n 0xf0

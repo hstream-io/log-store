@@ -19,6 +19,7 @@ module Log.Store.Base
     appendEntry,
     appendEntries,
     readEntries,
+    readEntriesByCount,
     close,
     shutDown,
     withLogStore,
@@ -214,7 +215,7 @@ data LogHandle = LogHandle
   { logName :: LogName,
     logID :: LogID,
     openOptions :: OpenOptions,
-    maxEntryIdRef :: IORef EntryID
+    maxEntryIdRef :: TVar EntryID
   }
   deriving (Eq)
 
@@ -272,7 +273,7 @@ open name opts@OpenOptions {..} = do
       case res of
         Nothing -> do
           id <- create name
-          maxEntryIdRef <- liftIO $ newIORef minEntryId
+          maxEntryIdRef <- liftIO $ newTVarIO dumbMinEntryId
           return $
             LogHandle
               { logName = name,
@@ -284,7 +285,7 @@ open name opts@OpenOptions {..} = do
           do
             let logId = decodeLogId bId
             res <- getMaxEntryId logId
-            maxEntryIdRef <- liftIO $ newIORef $ fromMaybe minEntryId res
+            maxEntryIdRef <- liftIO $ newTVarIO $ fromMaybe dumbMinEntryId res
             return $
               LogHandle
                 { logName = name,
@@ -433,7 +434,7 @@ getMaxEntryId logId = do
 
     findMaxEntryIdInDb :: MonadIO m => R.Iterator -> m (Maybe EntryID)
     findMaxEntryIdInDb iterator = do
-      R.seekForPrev iterator (encodeEntryKey $ EntryKey logId maxEntryId)
+      R.seekForPrev iterator (encodeEntryKey $ EntryKey logId dumbMaxEntryId)
       isValid <- R.valid iterator
       if isValid
         then do
@@ -481,7 +482,8 @@ appendEntry LogHandle {..} entry = do
         RWL.withRead
           rwLockForCurDb
           ( do
-              entryId <- generateEntryId maxEntryIdRef
+              entryIds <- generateEntryIds maxEntryIdRef 1
+              let entryId = head entryIds
               curDataDb <- readIORef curDataDbHandleRef
               R.put
                 curDataDb
@@ -506,18 +508,15 @@ appendEntries LogHandle {..} entries = do
           R.withWriteBatch $ appendEntries' curDataDb
       )
   where
+    appendEntries' :: R.DB -> R.WriteBatch -> IO (V.Vector EntryID)
     appendEntries' db batch = do
-      entryIds <-
-        V.forM
-          entries
-          batchAdd
+      entryIds <- generateEntryIds maxEntryIdRef $ V.length entries
+      let idVector = V.fromList entryIds
+      mapM_
+        (\(entryId, entry) -> R.batchPut batch (encodeEntryKey $ EntryKey logID entryId) entry)
+        (V.zip idVector entries)
       R.write db def batch
-      return entryIds
-      where
-        batchAdd entry = do
-          entryId <- generateEntryId maxEntryIdRef
-          R.batchPut batch (encodeEntryKey $ EntryKey logID entryId) entry
-          return entryId
+      return idVector
 
 -- readEntries ::
 --   MonadIO m =>
@@ -564,7 +563,7 @@ readEntries LogHandle {..} firstKey lastKey = do
     foldM
       (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap logID dbPath)
       Seq.empty
-      readOnlyDataDbNames
+      (filterReadOnlyDb readOnlyDataDbNames)
   if goOn prevRes
     then
       liftIO $
@@ -577,7 +576,16 @@ readEntries LogHandle {..} firstKey lastKey = do
           )
     else return prevRes
   where
-    -- f :: MonadIO m => LogID -> FilePath -> [(EntryID, Entry)] -> String -> m [(EntryID, Entry)]
+    filterReadOnlyDb :: [String] -> [String]
+    filterReadOnlyDb dbNames =
+      case firstKey of
+        Nothing -> dbNames
+        Just entryId ->
+          let dbTimestamps = fmap (read . drop (length dataDbNamePrefix)) dbNames
+              (l, r) = span (<= timestamp entryId) dbTimestamps
+              c = last l : r
+           in fmap ((dataDbNamePrefix ++) . show) c
+
     f cache gcMap rcMap logId dbPath prevRes dataDbName =
       if goOn prevRes
         then liftIO $ do
@@ -593,11 +601,6 @@ readEntries LogHandle {..} firstKey lastKey = do
         else return prevRes
 
     goOn prevRes = Seq.null prevRes || fst (lastElemInSeq prevRes) < limitEntryId
-
-    lastElemInSeq seq =
-      case seq of
-        Seq.Empty -> error "empty sequence"
-        _ :|> x -> x
 
     readEntriesInDb :: MonadIO m => LogID -> R.Iterator -> m (Seq (EntryID, Entry))
     readEntriesInDb logId iterator = do
@@ -623,8 +626,89 @@ readEntries LogHandle {..} firstKey lastKey = do
             Nothing -> return acc
             Just str -> liftIO $ throwIO $ LogStoreIOException $ "readEntries error: " ++ str
 
-    startEntryId = fromMaybe minEntryId firstKey
-    limitEntryId = fromMaybe maxEntryId lastKey
+    startEntryId = fromMaybe dumbMinEntryId firstKey
+    limitEntryId = fromMaybe dumbMaxEntryId lastKey
+
+readEntriesByCount ::
+  MonadIO m =>
+  LogHandle ->
+  Maybe EntryID ->
+  Int ->
+  ReaderT Context m (Seq (EntryID, Entry))
+readEntriesByCount LogHandle {..} firstKey num = do
+  Context {..} <- ask
+  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath rwLockForCurDb
+  prevRes <-
+    foldM
+      (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap logID dbPath)
+      Seq.empty
+      (filterReadOnlyDb readOnlyDataDbNames)
+  if goOn prevRes
+    then
+      liftIO $
+        RWL.withRead
+          rwLockForCurDb
+          ( do
+              curDb <- readIORef curDataDbHandleRef
+              res <- R.withIterator curDb def $ readEntriesInDb logID
+              return $ prevRes >< res
+          )
+    else return prevRes
+  where
+    filterReadOnlyDb :: [String] -> [String]
+    filterReadOnlyDb dbNames =
+      case firstKey of
+        Nothing -> dbNames
+        Just entryId ->
+          let dbTimestamps = fmap (read . drop (length dataDbNamePrefix)) dbNames
+              (l, r) = span (<= timestamp entryId) dbTimestamps
+              c = if null l then r else last l : r
+           in fmap ((dataDbNamePrefix ++) . show) c
+
+    f cache gcMap rcMap logId dbPath prevRes dataDbName =
+      if goOn prevRes
+        then liftIO $ do
+          res <-
+            withDbHandleForRead
+              cache
+              gcMap
+              rcMap
+              dbPath
+              dataDbName
+              (\dbForRead -> R.withIterator dbForRead def $ readEntriesInDb logId)
+          return $ prevRes >< res
+        else return prevRes
+
+    goOn prevRes = Seq.length prevRes < num
+
+    readEntriesInDb :: MonadIO m => LogID -> R.Iterator -> m (Seq (EntryID, Entry))
+    readEntriesInDb logId iterator = do
+      R.seek iterator (encodeEntryKey $ EntryKey logId startEntryId)
+      loop logId iterator Seq.empty
+
+    loop :: MonadIO m => LogID -> R.Iterator -> Seq (EntryID, Entry) -> m (Seq (EntryID, Entry))
+    loop logId iterator acc =
+      if goOn acc
+        then do
+          isValid <- R.valid iterator
+          if isValid
+            then do
+              entryKey <- R.key iterator
+              let (EntryKey entryLogId entryId) = decodeEntryKey entryKey
+              if entryLogId == logId
+                then do
+                  entry <- R.value iterator
+                  R.next iterator
+                  loop logId iterator (acc |> (entryId, entry))
+                else return acc
+            else do
+              errStr <- R.getError iterator
+              case errStr of
+                Nothing -> return acc
+                Just str -> liftIO $ throwIO $ LogStoreIOException $ "readEntries error: " ++ str
+        else return acc
+
+    startEntryId = fromMaybe dumbMinEntryId firstKey
 
 -- | close log
 -- |
