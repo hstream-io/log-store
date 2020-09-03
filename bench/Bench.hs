@@ -66,7 +66,7 @@ main =
 nBytesEntry :: Int -> B.ByteString
 nBytesEntry n = B.replicate n 0xff
 
-writeNBytesEntries :: MonadUnliftIO m => Int -> Int -> m EntryID
+writeNBytesEntries :: MonadUnliftIO m => Int -> Int -> m () 
 writeNBytesEntries entrySize entryNum =
   withLogStoreBench $ do
     lh <-
@@ -77,13 +77,16 @@ writeNBytesEntries entrySize entryNum =
   where
     write' lh x =
       if x == entryNum
-        then appendEntry lh entry
+        then do
+          appendEntry lh entry
+          return ()
         else do
           appendEntry lh entry
           write' lh (x + 1)
+          return ()
     entry = nBytesEntry entrySize
 
-writeNBytesEntriesBatch :: MonadUnliftIO m => Int -> Int -> Int -> m (V.Vector EntryID)
+writeNBytesEntriesBatch :: MonadUnliftIO m => Int -> Int -> Int -> m ()
 writeNBytesEntriesBatch entrySize batchSize batchNum =
   withLogStoreBench $ do
     lh <-
@@ -94,10 +97,13 @@ writeNBytesEntriesBatch entrySize batchSize batchNum =
   where
     write' lh x =
       if x == batchNum
-        then appendEntries lh $ V.replicate batchSize entry
+        then do
+          appendEntries lh $ V.replicate batchSize entry
+          return ()
         else do
           appendEntries lh $ V.replicate batchSize entry
           write' lh (x + 1)
+          return ()
     entry = nBytesEntry entrySize
 
 writeAndRead :: MonadUnliftIO m => Int -> Int -> Int -> m ()

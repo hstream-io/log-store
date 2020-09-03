@@ -69,7 +69,7 @@ readOpts =
       readBatchSize = 1024 &= help "num of entry each read",
       logNamePrefix = "log" &= help "name prefix of logs to read",
       logNum = 1 &= help "num of log to read",
-      maxAllowedOpenDbs = 1 &= help "max num of allowed open Dbs"
+      maxAllowedOpenDbs = -1 &= help "max num of allowed open Dbs"
     }
     &= help "read"
 
@@ -82,7 +82,7 @@ mixOpts =
       dbPath = "/tmp/rocksdb" &= help "which to store data",
       logNamePrefix = "log" &= help "name prefix of logs to write",
       logNum = 1 &= help "num of log to write",
-      maxAllowedOpenDbs = 1 &= help "max num of allowed open Dbs while reading"
+      maxAllowedOpenDbs = -1 &= help "max num of allowed open Dbs while reading"
     }
     &= help "mix"
 
@@ -99,7 +99,9 @@ main = do
           { rootDbPath = dbPath,
             dataCfWriteBufferSize = 200 * 1024 * 1024,
             enableDBStatistics = True,
-            dbStatsDumpPeriodSec = 10
+            dbStatsDumpPeriodSec = 10,
+            partitionInterval = 10,
+            partitionFilesNumLimit = 8
           }
         (mapConcurrently_ (appendTask dict totalSize entrySize batchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
     Read {..} -> do
@@ -177,14 +179,22 @@ readTask expectedEntry dict batchSize logName = do
           )
           res
       case res of
-        Seq.Empty -> do
-          liftIO $ threadDelay 1000
-          readBatch lh start count
+        Seq.Empty ->
+          liftIO $ putStrLn "read get empty result"
         _ :|> x -> do
           let prevEntryId = fst x
-          let readNum = Seq.length res
-          increaseBy dict readEntryNumKey $ toInteger readNum
-          readBatch lh (Just prevEntryId) count
+          case start of
+            Nothing -> do
+              let readNum = Seq.length res
+              increaseBy dict readEntryNumKey $ toInteger readNum
+              readBatch lh (Just prevEntryId) count
+            Just s ->
+              if s == prevEntryId
+                then liftIO $ putStrLn "read get nothing new result"
+                else do
+                  let readNum = Seq.length res
+                  increaseBy dict readEntryNumKey $ toInteger readNum
+                  readBatch lh (Just prevEntryId) count
 
 nBytesEntry :: Int -> B.ByteString
 nBytesEntry n = B.replicate n 0xf0
