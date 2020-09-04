@@ -30,9 +30,9 @@ module Log.Store.Base
   )
 where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (MVar, modifyMVar_, newMVar, threadDelay)
 import Control.Concurrent.Async (Async, async, cancel)
-import qualified Control.Concurrent.ReadWriteLock as RWL
+import qualified Control.Concurrent.Classy.RWLock as RWL
 import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, retry, writeTVar)
 import Control.Exception (bracket, throwIO)
 import Control.Monad (foldM, forever, when)
@@ -86,7 +86,8 @@ defaultConfig =
 data Context = Context
   { dbPath :: FilePath,
     metaDbHandle :: R.DB,
-    rwLockForCurDb :: RWL.RWLock,
+    writeFlagForCurDb :: MVar Bool,
+    rwLockForCurDb :: RWL.RWLock IO,
     curDataDbHandleRef :: IORef R.DB,
     logHandleCache :: TVar (H.HashMap LogHandleKey LogHandle),
     maxLogIdRef :: IORef LogID,
@@ -101,7 +102,8 @@ shardingTask ::
   Int ->
   FilePath ->
   Word64 ->
-  RWL.RWLock ->
+  MVar Bool ->
+  RWL.RWLock IO ->
   IORef R.DB ->
   IO ()
 shardingTask
@@ -109,22 +111,30 @@ shardingTask
   partitionFilesNumLimit
   dbPath
   cfWriteBufferSize
+  writeFlag
   rwLock
   curDataDbHandleRef = forever $ do
+    -- putStrLn "ready to sharding, will delay..."
     threadDelay $ partitionInterval * 1000000
     curDb <- RWL.withRead rwLock $ readIORef curDataDbHandleRef
     curDataDbFilesNum <- getFilesNumInDb curDb
+    -- putStrLn $ "sharding block finish, curfileNums: " ++ show curDataDbFilesNum ++ ", partitionFilesNumLimit: " ++ show partitionFilesNumLimit
     when
       (curDataDbFilesNum >= partitionFilesNumLimit)
-      $ RWL.withWrite
-        rwLock
-        ( do
-            newDbName <- generateDataDbName
-            newDbHandle <- createDataDb dbPath newDbName cfWriteBufferSize
-            R.flush curDb def
-            R.close curDb
-            writeIORef curDataDbHandleRef newDbHandle
-        )
+      ( do
+          modifyMVar_ writeFlag (\_ -> return True)
+          RWL.withWrite
+            rwLock
+            ( do
+                newDbName <- generateDataDbName
+                newDbHandle <- createDataDb dbPath newDbName cfWriteBufferSize
+                R.flush curDb def
+                R.close curDb
+                -- putStrLn $ "sharding create new db: " ++ newDbName
+                writeIORef curDataDbHandleRef newDbHandle
+                modifyMVar_ writeFlag (\_ -> return False)
+            )
+      )
 
 openMetaDb :: MonadIO m => Config -> m R.DB
 openMetaDb Config {..} = do
@@ -148,7 +158,8 @@ initialize cfg@Config {..} =
     newDataDbHandle <- createDataDb rootDbPath newDataDbName dataCfWriteBufferSize
     newDataDbHandleRef <- newIORef newDataDbHandle
 
-    newRWLock <- RWL.new
+    newWriteFlag <- newMVar False
+    newRWLock <- RWL.newRWLock
     logHandleCache <- newTVarIO H.empty
     maxLogId <- getMaxLogId metaDb
     logIdRef <- newIORef maxLogId
@@ -159,6 +170,7 @@ initialize cfg@Config {..} =
           partitionFilesNumLimit
           rootDbPath
           dataCfWriteBufferSize
+          newWriteFlag
           newRWLock
           newDataDbHandleRef
 
@@ -171,6 +183,7 @@ initialize cfg@Config {..} =
       Context
         { dbPath = rootDbPath,
           metaDbHandle = metaDb,
+          writeFlagForCurDb = newWriteFlag,
           rwLockForCurDb = newRWLock,
           curDataDbHandleRef = newDataDbHandleRef,
           logHandleCache = logHandleCache,
@@ -413,7 +426,7 @@ withDbHandleForRead
 getMaxEntryId :: MonadIO m => LogID -> ReaderT Context m (Maybe EntryID)
 getMaxEntryId logId = do
   Context {..} <- ask
-  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath rwLockForCurDb
+  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath writeFlagForCurDb rwLockForCurDb
   foldM
     (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap dbPath)
     Nothing
@@ -477,21 +490,21 @@ appendEntry :: MonadIO m => LogHandle -> Entry -> ReaderT Context m EntryID
 appendEntry LogHandle {..} entry = do
   Context {..} <- ask
   if writeMode openOptions
-    then
-      liftIO $
-        RWL.withRead
-          rwLockForCurDb
-          ( do
-              entryIds <- generateEntryIds maxEntryIdRef 1
-              let entryId = head entryIds
-              curDataDb <- readIORef curDataDbHandleRef
-              R.put
-                curDataDb
-                R.defaultWriteOptions
-                (encodeEntryKey $ EntryKey logID entryId)
-                entry
-              return entryId
-          )
+    then liftIO $ do
+      yieldWhenSeeWriteFlag writeFlagForCurDb
+      RWL.withRead
+        rwLockForCurDb
+        ( do
+            entryIds <- generateEntryIds maxEntryIdRef 1
+            let entryId = head entryIds
+            curDataDb <- readIORef curDataDbHandleRef
+            R.put
+              curDataDb
+              R.defaultWriteOptions
+              (encodeEntryKey $ EntryKey logID entryId)
+              entry
+            return entryId
+        )
     else
       liftIO $
         throwIO $
@@ -500,7 +513,8 @@ appendEntry LogHandle {..} entry = do
 appendEntries :: MonadIO m => LogHandle -> V.Vector Entry -> ReaderT Context m (V.Vector EntryID)
 appendEntries LogHandle {..} entries = do
   Context {..} <- ask
-  liftIO $
+  liftIO $ do
+    yieldWhenSeeWriteFlag writeFlagForCurDb
     RWL.withRead
       rwLockForCurDb
       ( do
@@ -558,7 +572,7 @@ readEntries ::
   ReaderT Context m (Seq (EntryID, Entry))
 readEntries LogHandle {..} firstKey lastKey = do
   Context {..} <- ask
-  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath rwLockForCurDb
+  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath writeFlagForCurDb rwLockForCurDb
   prevRes <-
     foldM
       (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap logID dbPath)
@@ -637,22 +651,22 @@ readEntriesByCount ::
   ReaderT Context m (Seq (EntryID, Entry))
 readEntriesByCount LogHandle {..} firstKey num = do
   Context {..} <- ask
-  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath rwLockForCurDb
+  readOnlyDataDbNames <- getReadOnlyDataDbNames dbPath writeFlagForCurDb rwLockForCurDb
   prevRes <-
     foldM
       (f dbHandlesForReadCache dbHandlesForReadEvcited dbHandlesForReadRcMap logID dbPath)
       Seq.empty
       (filterReadOnlyDb readOnlyDataDbNames)
   if goOn prevRes
-    then
-      liftIO $
-        RWL.withRead
-          rwLockForCurDb
-          ( do
-              curDb <- readIORef curDataDbHandleRef
-              res <- R.withIterator curDb def $ readEntriesInDb logID
-              return $ prevRes >< res
-          )
+    then liftIO $ do
+      yieldWhenSeeWriteFlag writeFlagForCurDb
+      RWL.withRead
+        rwLockForCurDb
+        ( do
+            curDb <- readIORef curDataDbHandleRef
+            res <- R.withIterator curDb def $ readEntriesInDb logID
+            return $ prevRes >< res
+        )
     else return prevRes
   where
     filterReadOnlyDb :: [String] -> [String]

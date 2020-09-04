@@ -39,7 +39,7 @@ dependencies:
 - atomic-primops
 - async
 - time
-- concurrent-extra
+- concurrency 
 - lifted-base 
 - monad-control 
 - lrucache
