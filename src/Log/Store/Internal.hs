@@ -11,9 +11,11 @@ import ByteString.StrictBuilder (Builder, builderBytes, word64BE)
 -- import Control.Monad.Trans.Control (MonadBaseControl)
 -- import Control.Monad.Trans.Resource (MonadUnliftIO, allocate, runResourceT)
 
-import qualified Control.Concurrent.ReadWriteLock as RWL
+import Control.Concurrent (MVar, readMVar, yield)
+import qualified Control.Concurrent.Classy.RWLock as RWL
 import Control.Concurrent.STM (TVar, atomically, readTVar, writeTVar)
 import Control.Exception (bracket, throw, throwIO)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Atomics (atomicModifyIORefCAS)
 import Data.Binary.Strict.Get (Get, getWord64be, runGet)
@@ -184,12 +186,20 @@ withDbReadOnly dbPath =
     )
     R.close
 
-getReadOnlyDataDbNames :: MonadIO m => FilePath -> RWL.RWLock -> m [FilePath]
-getReadOnlyDataDbNames dbPath rwLock =
-  liftIO $
-    RWL.withRead
-      rwLock
-      ( do
-          res <- listDirectory dbPath
-          return $ init $ sort $ filter (isPrefixOf dataDbNamePrefix) res
-      )
+getReadOnlyDataDbNames :: MonadIO m => FilePath -> MVar Bool -> RWL.RWLock IO -> m [FilePath]
+getReadOnlyDataDbNames dbPath writeFlag rwLock = liftIO $ do
+  yieldWhenSeeWriteFlag writeFlag
+  RWL.withRead
+    rwLock
+    ( do
+        res <- liftIO $ listDirectory dbPath
+        return $ init $ sort $ filter (isPrefixOf dataDbNamePrefix) res
+    )
+
+yieldWhenSeeWriteFlag :: MVar Bool -> IO ()
+yieldWhenSeeWriteFlag flag = do
+  needWait <- readMVar flag
+  when needWait $
+    do
+      yield
+      yieldWhenSeeWriteFlag flag

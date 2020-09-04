@@ -100,8 +100,8 @@ main = do
             dataCfWriteBufferSize = 200 * 1024 * 1024,
             enableDBStatistics = True,
             dbStatsDumpPeriodSec = 10,
-            partitionInterval = 10,
-            partitionFilesNumLimit = 8
+            partitionInterval = 20,
+            partitionFilesNumLimit = 1
           }
         (mapConcurrently_ (appendTask dict totalSize entrySize batchSize . T.append logNamePrefix . T.pack . show) [1 .. logNum])
     Read {..} -> do
