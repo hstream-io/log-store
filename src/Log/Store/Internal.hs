@@ -55,7 +55,18 @@ data EntryID = EntryID
   { timestamp :: Word64,
     offset :: Word64
   }
-  deriving (Eq, Show, Ord)
+  deriving (Eq, Ord)
+
+instance Show EntryID where
+  show (EntryID timestamp offset) = show timestamp ++ "-" ++ show offset
+
+instance Read EntryID where
+  readsPrec _ s =
+    let l = takeWhile (/= '-') s
+        r = tail $ dropWhile (/= '-') s
+        t = read l :: Word64
+        o = read r :: Word64
+     in [(EntryID t o, "")]
 
 dumbMinEntryId :: EntryID
 dumbMinEntryId = EntryID 0 0
@@ -83,7 +94,7 @@ getEntryId :: Get EntryID
 getEntryId = EntryID <$> getWord64be <*> getWord64be
 
 decodeEntryId :: B.ByteString -> EntryID
-decodeEntryId = handleDecodeError . runGet getEntryId 
+decodeEntryId = handleDecodeError . runGet getEntryId
 
 encodeEntryKey :: EntryKey -> B.ByteString
 encodeEntryKey (EntryKey logId entryId) =
