@@ -12,9 +12,9 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.UTF8 as U
 import qualified Data.Foldable as F
-import qualified Data.Sequence as Seq 
 import Data.Function ((&))
 import Data.List (sort)
+import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
 import Data.Word (Word64)
 import Log.Store.Base
@@ -224,7 +224,7 @@ main = hspec $
               res <- F.toList <$> readEntries logHandle Nothing Nothing
               return $ map snd res
           )
-          `shouldReturn` generateReadResult 300 "" 
+          `shouldReturn` generateReadResult 300 ""
       it "readEntriesByCount (1)" $
         withLogStoreTest
           ( do
@@ -233,10 +233,10 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               appendEntryRepeat 300 logHandle ""
-              res <- F.toList <$> readEntriesByCount logHandle Nothing 10 
+              res <- F.toList <$> readEntriesByCount logHandle Nothing 10
               return $ map snd res
           )
-          `shouldReturn` generateReadResult 10 "" 
+          `shouldReturn` generateReadResult 10 ""
       it "readEntriesByCount (2)" $
         withLogStoreTest
           ( do
@@ -245,10 +245,10 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               appendEntryRepeat 300 logHandle ""
-              res <- F.toList <$> readEntriesByCount logHandle Nothing 500 
+              res <- F.toList <$> readEntriesByCount logHandle Nothing 500
               return $ map snd res
           )
-          `shouldReturn` generateReadResult 300 "" 
+          `shouldReturn` generateReadResult 300 ""
       it "readEntriesByCount (3)" $
         withLogStoreTest
           ( do
@@ -257,11 +257,22 @@ main = hspec $
                   "log"
                   defaultOpenOptions {writeMode = True, createIfMissing = True}
               appendEntryRepeat 300 logHandle ""
-              r1 <- readEntriesByCount logHandle Nothing 10 
-              r2 <- readEntriesByCount logHandle (Just $ fst $ lastElemInSeq r1) 50 
-              return $ map snd $ F.toList r2 
+              r1 <- readEntriesByCount logHandle Nothing 10
+              r2 <- readEntriesByCount logHandle (Just $ fst $ lastElemInSeq r1) 50
+              return $ map snd $ F.toList r2
           )
-          `shouldReturn` generateReadResult 50 "" 
+          `shouldReturn` generateReadResult 50 ""
+      it "show and read entryId" $
+        withLogStoreTest
+          ( do
+              logHandle <-
+                open
+                  "log"
+                  defaultOpenOptions {writeMode = True, createIfMissing = True}
+              entryId <- appendEntry logHandle "entry"
+              return $ entryId == read (show entryId)
+          )
+          `shouldReturn` True
       it "multiple open" $
         withLogStoreTest
           ( do
@@ -282,7 +293,7 @@ main = hspec $
               res <- F.toList <$> readEntries lh3 Nothing Nothing
               return $ map snd res
           )
-          `shouldReturn` generateReadResult 600 "" 
+          `shouldReturn` generateReadResult 600 ""
       it "sequencial open the same log should return the same logHandle" $
         withLogStoreTest
           ( do
@@ -412,7 +423,7 @@ main = hspec $
               res <- F.toList <$> readEntries lh Nothing Nothing
               return $ map snd res
           )
-          `shouldReturn` generateReadResult 900 "" 
+          `shouldReturn` generateReadResult 900 ""
 
 -- | append n entries to a log
 appendEntryRepeat :: MonadIO m => Int -> LogHandle -> String -> ReaderT Context m EntryID
@@ -451,7 +462,7 @@ generateReadResult num entryPrefix = replicate num (C.pack $ entryPrefix ++ test
 testEntryContent :: String
 testEntryContent = "entry"
 
-lastElemInSeq :: Seq.Seq a -> a 
+lastElemInSeq :: Seq.Seq a -> a
 lastElemInSeq seq =
   case seq of
     Seq.Empty -> error "empty sequence"
